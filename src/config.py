@@ -66,6 +66,7 @@ class Config:
     memory_dir: Path
     sessions_dir: Path
     steps_dir: Path
+    scratch_dir: Path
     history_file: Path
     latest_session_file: Path
 
@@ -128,8 +129,17 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     memory_dir = GLOBAL_DIR / "memory"
     sessions_dir = project_dir / "sessions"
     steps_dir = project_dir / "steps"
+    # Inside the workspace, not under GLOBAL_DIR like everything else here:
+    # FileSystem sandboxes read_file/list_directory/find_files to a single
+    # root_dir (cwd) with no multi-root support, so a clone placed outside
+    # it is reachable only by raw shell commands, never by those safer,
+    # scoped tools. It also can't be a dot-prefixed directory: list_directory
+    # /search_files/find_files skip any path with a dot-prefixed component,
+    # so e.g. `.tcode-scratch/repo/README.md` would resolve but never show
+    # up in a listing, making it undiscoverable in practice.
+    scratch_dir = cwd / "tcode-scratch"
 
-    for d in (memory_dir, sessions_dir, steps_dir):
+    for d in (memory_dir, sessions_dir, steps_dir, scratch_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     return Config(
@@ -148,6 +158,10 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         memory_dir=memory_dir,
         sessions_dir=sessions_dir,
         steps_dir=steps_dir,
-        history_file=GLOBAL_DIR / "input_history",
+        scratch_dir=scratch_dir,
+        # Per-project like everything except memory (see module docstring):
+        # a global history file would mix REPL input across every project
+        # the tool has ever been run in.
+        history_file=project_dir / "input_history",
         latest_session_file=sessions_dir / "latest.json",
     )

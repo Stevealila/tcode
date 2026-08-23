@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 import time
 from pathlib import Path
@@ -27,6 +28,30 @@ from .agent import build_agent
 from .config import Config, ConfigError, load_config
 from .ratelimit import throttle
 from .sessions import list_sessions, load_latest_session, save_session
+
+
+_MARKDOWN_TABLE_ROW = re.compile(r"\|\s*-{2,}\s*\|")
+_SUBSTANTIVE_ANSWER_CHARS = 800
+
+
+def _skipped_reading_files(tool_names: set[str], final_text: str) -> bool:
+    """Whether this turn produced a substantial answer without reading any file.
+
+    A `ToolGuardrail` can force the *scoping* of exploration (see
+    guardrails.py) because that fires per tool call, before the call runs.
+    There's no equivalent lever for "the model wrote a long analysis without
+    reading any source" — that's a property of the whole turn, only visible
+    after it's over, and `OutputGuardrail`'s retry/block verdicts aren't
+    supported on the streaming run this CLI uses (they'd surface as
+    UnexpectedModelBehavior instead of a graceful re-prompt). So instead of
+    trying to force a retry, this only tells the user the truth: a
+    review-shaped answer built entirely from directory listings is a
+    directory-level impression, not a code review, however confident it
+    reads.
+    """
+    if not tool_names or "read_file" in tool_names:
+        return False
+    return len(final_text) > _SUBSTANTIVE_ANSWER_CHARS or bool(_MARKDOWN_TABLE_ROW.search(final_text))
 
 
 def _friendly_error(e: Exception) -> str:
@@ -63,6 +88,8 @@ async def run_turn(
     """Run one turn, streaming assistant text and tool activity live."""
     start = time.monotonic()
     streaming_text = False
+    final_text_parts: list[str] = []
+    tool_names: set[str] = set()
 
     async with agent.iter(
         prompt, message_history=message_history, usage_limits=usage_limits
@@ -87,6 +114,7 @@ async def run_turn(
                             text = event.delta.content_delta
                         if text:
                             streaming_text = True
+                            final_text_parts.append(text)
                             sys.stdout.write(text)
                             sys.stdout.flush()
             elif Agent.is_call_tools_node(node):
@@ -98,6 +126,7 @@ async def run_turn(
                     async for event in stream:
                         if isinstance(event, FunctionToolCallEvent):
                             part = event.part
+                            tool_names.add(part.tool_name)
                             try:
                                 args = part.args_as_dict()
                             except Exception:
@@ -121,6 +150,13 @@ async def run_turn(
     elapsed = time.monotonic() - start
     usage = result.usage
     ui.render_usage(usage.cost, usage.total_tokens, elapsed)
+
+    if _skipped_reading_files(tool_names, "".join(final_text_parts)):
+        ui.print_notice(
+            "note: that answer didn't read any file contents "
+            f"(only used: {', '.join(sorted(tool_names))}) — treat it as a "
+            "directory-level impression, not a code review."
+        )
 
     return result.all_messages()
 

@@ -42,12 +42,16 @@ from pydantic_ai_harness import (
     SubAgents,
 )
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
+from pydantic_ai_harness.guardrails import ToolGuardrail
 from pydantic_ai_harness.memory import FileStore
 from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
 from .config import Config
+from .guardrails import scope_shell_exploration
 
-CODER_INSTRUCTIONS = """\
+
+def _coder_instructions(scratch_dir: Path) -> str:
+    return f"""\
 You are tcode, a system-wide coding agent running directly in the user's
 terminal, in the current project's working directory. You have full
 workspace-rooted file access and a real shell: use whatever CLI tools are
@@ -66,6 +70,29 @@ or dumping file contents, since they're already scoped and bounded and raw
 shell output isn't. Don't run a broad recursive listing when a targeted one
 answers the question. Never re-paste large tool output back to the user in
 your reply; describe or summarize it instead.
+
+When the user asks about something that isn't the current workspace (e.g.
+"the X repo", a package to inspect, a URL to fetch), resolve it the direct
+way first — e.g. `gh repo view <name>` / `gh repo clone <name>` — rather
+than exploring the current workspace root or asking the user to
+disambiguate up front; a bare name is normally enough for a tool like `gh`
+to resolve against the user's own account, and the lookup itself will tell
+you if it's actually ambiguous. Only ask the user for a fuller identifier if
+that direct attempt fails or turns up more than one real match. Once you
+have the thing, clone or download it into {scratch_dir} — a subdirectory of
+this workspace set aside for working copies and temp files, so you don't
+scatter loose clones elsewhere in the user's directories — rather than
+directly into cwd or the user's home directory. It's a normal path under
+this workspace, so your own list_directory/read_file/find_files tools work
+on it exactly like anywhere else in the project (relative paths like
+`tcode-scratch/<name>/...` resolve fine); you don't need to clean it up
+afterward.
+
+When asked to review, assess, or give an opinion on a codebase, that means
+reading the actual contents of its most relevant source files, not just
+listing the directory tree. A file tree with generic advice ("add tests",
+"add CI") is not a review; cite real files, real lines, and specific
+behavior you found by reading the code.
 """
 
 
@@ -89,7 +116,7 @@ def build_agent(cfg: Config) -> Agent:
 
     workspace = str(cfg.cwd)
     capabilities = [
-        Capability(instructions=CODER_INSTRUCTIONS),
+        Capability(instructions=_coder_instructions(cfg.scratch_dir)),
         FileSystem(workspace),
         Shell(
             cwd=workspace,
@@ -99,6 +126,10 @@ def build_agent(cfg: Config) -> Agent:
         RepoContext(workspace_dir=cfg.cwd),
         Planning(),
         SubAgents(agents=[_explorer(workspace)], agent_folders=None),
+        # Technical backstop for the "scope exploration" instruction above:
+        # observed behavior shows the model doesn't always follow it. See
+        # guardrails.py's module docstring for the incident that prompted this.
+        ToolGuardrail(guard=scope_shell_exploration),
         # Tuned for Groq's tokens-per-minute budget rather than a generic
         # large context window; see module docstring.
         ClearToolResults(max_tokens=cfg.clear_after_tokens, keep_pairs=cfg.keep_tool_pairs),

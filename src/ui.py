@@ -16,6 +16,7 @@ BANNER = """\
   [dim]dir[/dim]     {cwd}
   [dim]model[/dim]   {model}
   [dim]memory[/dim]  {memory_dir}
+  [dim]scratch[/dim] {scratch_dir}
 [dim]/help for commands, Ctrl-D or /exit to leave[/dim]
 """
 
@@ -31,7 +32,12 @@ HELP = """\
 
 def print_banner(cfg: Config) -> None:
     console.print(
-        BANNER.format(cwd=cfg.cwd, model=cfg.model, memory_dir=cfg.memory_dir)
+        BANNER.format(
+            cwd=cfg.cwd,
+            model=cfg.model,
+            memory_dir=cfg.memory_dir,
+            scratch_dir=cfg.scratch_dir,
+        )
     )
 
 
