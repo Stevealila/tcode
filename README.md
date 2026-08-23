@@ -4,10 +4,7 @@ Want Claude Code's file editing, shell access, and persistent memory without
 the subscription? tcode is a terminal coding agent that gives you the same
 core capabilities — workspace-rooted file read/write/edit/search, a real
 shell, memory that carries across projects — running on free-tier inference
-instead. It currently runs on [Groq](https://groq.com), built with
-[Pydantic AI](https://ai.pydantic.dev)'s [harness](https://ai.pydantic.dev/harness/)
-capability library — early days, so the underlying stack may change as the
-project grows.
+instead.
 
 ## Install
 
