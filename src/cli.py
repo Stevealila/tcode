@@ -32,25 +32,23 @@ from .sessions import list_sessions, load_latest_session, save_session
 def _friendly_error(e: Exception) -> str:
     """Turn a raw exception into something a terminal user can act on.
 
-    The one case worth special-casing is Groq's rate limits: they surface
-    as an HTTP 413 (tokens per minute) or 429 (requests per minute) with a
-    JSON body, and the raw dataclass repr is not something a user should
-    have to parse to know what to do about it. Our own throttle() guards
-    RPM proactively, so a 429 here most likely means another process (or
-    another use of this account) ate the budget in the meantime.
+    Groq's rate-limit responses (HTTP 413/429) already carry a precise,
+    well-formed message naming exactly which budget was hit — requests or
+    tokens, per minute or per day — and how long to wait. Surface that
+    directly rather than guessing from the status code alone: a 429 can
+    mean requests-per-minute (our own throttle() should prevent that one),
+    but it can just as easily mean the *daily* token quota is exhausted,
+    which is a completely different situation with a completely different
+    fix (wait, it's unrelated to conversation size, /clear won't help).
     """
-    if isinstance(e, ModelHTTPError) and e.status_code == 413:
+    if isinstance(e, ModelHTTPError) and e.status_code in (413, 429):
+        detail = e.body.get("error", {}).get("message") if isinstance(e.body, dict) else None
+        if detail:
+            return f"{e.model_name} rejected the request (HTTP {e.status_code}): {detail}"
         return (
-            f"{e.model_name} rejected the request (HTTP 413). You've "
-            "likely hit Groq's tokens-per-minute limit for this "
-            "model/tier. Try /clear to shrink the conversation, wait a "
-            "minute, or switch models with --model."
-        )
-    if isinstance(e, ModelHTTPError) and e.status_code == 429:
-        return (
-            f"{e.model_name} rejected the request (HTTP 429, too many "
-            "requests). Something else is also using this Groq account "
-            "right now. Wait a minute and try again."
+            f"{e.model_name} rejected the request (HTTP {e.status_code}) — "
+            "likely a Groq rate limit. Wait and try again, or switch "
+            "models with --model."
         )
     return str(e)
 
