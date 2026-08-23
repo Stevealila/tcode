@@ -1,19 +1,25 @@
 # tcode
 
-A system-wide, terminal-based coding agent powered by [Groq](https://groq.com)
-models. Fast, hackable, self-hosted alternative to Claude Code.
-
-Built on [Pydantic AI](https://ai.pydantic.dev) and its
-[harness](https://ai.pydantic.dev/harness/) capability library: a
-workspace-rooted `Coder` capability (file read/write/edit/search plus an
-allowlisted shell) and a persistent cross-project `Memory` notebook, running
-on top of Groq's inference speed.
+Want Claude Code's file editing, shell access, and persistent memory without
+the subscription? tcode is a terminal coding agent that gives you the same
+core capabilities — workspace-rooted file read/write/edit/search, a real
+shell, memory that carries across projects — running on
+[Groq](https://groq.com)'s free-tier inference instead. It's built entirely
+from [Pydantic AI](https://ai.pydantic.dev) and its
+[harness](https://ai.pydantic.dev/harness/) capability library, so it's as
+hackable as it is fast.
 
 ## Install
 
-From this directory:
+### Prerequisites
+
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- A [Groq API key](https://console.groq.com/keys) (free tier available)
 
 ```bash
+git clone https://github.com/Stevealila/tcode.git
+cd tcode
 uv tool install --editable .
 ```
 
