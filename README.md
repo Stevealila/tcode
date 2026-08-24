@@ -283,6 +283,32 @@ date-range filter, say. The caller keeps owning that logic and just hands
 tcode the resulting list; tcode doesn't need to learn what "the last 14
 days" means for someone else's files.
 
+### `--write PATH`: guaranteeing the answer actually lands on disk
+
+At large output sizes, an open-weight tool-calling model can fail to make
+its final `write_file` call cleanly — a garbled tool name from malformed
+function-call encoding, or the model printing the call as JSON prose
+instead of actually issuing it, usually truncated by the same length
+pressure that caused it. tcode retries the whole turn a bounded number of
+times when this happens (distinct from a single tool call's own retry
+budget — this restarts the turn itself) and, when a turn does produce real
+text, never discards it just because the tool call built on top of it
+broke. Neither of those guarantees the write happens at all, though — a
+model that fails the same way on every retry still won't produce a file.
+
+For a caller that already knows the one path a run is supposed to write —
+a report at a fixed location, say — `--write PATH` closes that gap:
+
+```bash
+tcode --reduce "data/*.md" --write out/summary.md "Summarize each file, then write one combined report to out/summary.md."
+```
+
+If `PATH`'s mtime hasn't changed by the time the turn ends, tcode writes
+the model's own final answer there directly, so the caller's file exists
+either way — via a real `write_file` call, or via this fallback — without
+needing to detect and paper over the failure itself. Works the same way
+for a plain one-shot call, not just `--reduce`.
+
 ## Extending
 
 Everything is one file each in `src/`:

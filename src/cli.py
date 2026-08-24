@@ -20,6 +20,56 @@ from .runner import run_turn
 from .sessions import list_sessions, load_latest_session, save_session
 
 
+def _resolve_write_path(cfg: Config, raw: str) -> Path:
+    """Resolve --write's target relative to cfg.cwd, refusing to escape it.
+
+    Same sandboxing intent as FileSystem's own root_dir, applied to a path
+    this process writes directly rather than one a tool call resolves.
+    """
+    p = (cfg.cwd / raw).resolve()
+    try:
+        p.relative_to(cfg.cwd)
+    except ValueError:
+        raise ConfigError(
+            f"--write path must stay inside the workspace ({cfg.cwd}), got {raw!r}"
+        ) from None
+    return p
+
+
+def _mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
+def _apply_write_fallback(
+    write_path: Path | None, before_mtime: float | None, final_text: str, *, quiet: bool
+) -> None:
+    """A Python-level safety net for --write, see build_parser()'s help text.
+
+    Mtime-based rather than "did a write_file call to this exact path
+    happen": that's what the caller actually cares about (is the file on
+    disk different now?), and it's the same check profile_scout.sh/
+    story_intake.sh/state_of_market.sh already had to write themselves in
+    bash before this existed — moved here once so no caller has to
+    reimplement it.
+    """
+    if write_path is None:
+        return
+    if _mtime(write_path) != before_mtime:
+        return
+    if not final_text.strip():
+        return
+    write_path.parent.mkdir(parents=True, exist_ok=True)
+    write_path.write_text(final_text)
+    ui.print_notice(
+        f"--write: the model's own write didn't land this turn — wrote its "
+        f"answer to {write_path} directly",
+        quiet=quiet,
+    )
+
+
 def _friendly_error(e: Exception) -> str:
     """Turn a raw exception into something a terminal user can act on.
 
@@ -94,15 +144,24 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
 
 
 async def one_shot(
-    cfg: Config, prompt: str, message_history: list[ModelMessage], *, quiet: bool = False
+    cfg: Config,
+    prompt: str,
+    message_history: list[ModelMessage],
+    *,
+    quiet: bool = False,
+    write_path: Path | None = None,
 ) -> None:
     agent = build_agent(cfg)
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
+    before_mtime = _mtime(write_path) if write_path else None
     try:
-        message_history, _ = await run_turn(agent, prompt, message_history, usage_limits, cfg, quiet=quiet)
+        message_history, final_text = await run_turn(
+            agent, prompt, message_history, usage_limits, cfg, quiet=quiet
+        )
     except Exception as e:  # noqa: BLE001
         ui.print_error(_friendly_error(e))
         raise SystemExit(1) from e
+    _apply_write_fallback(write_path, before_mtime, final_text, quiet=quiet)
     save_session(cfg, message_history)
 
 
@@ -149,18 +208,28 @@ async def verify_mode(cfg: Config, prompt: str) -> None:
     raise SystemExit(2)
 
 
-async def reduce_mode(cfg: Config, prompt: str, pattern: str, message_history: list[ModelMessage], *, quiet: bool) -> None:
+async def reduce_mode(
+    cfg: Config,
+    prompt: str,
+    pattern: str,
+    message_history: list[ModelMessage],
+    *,
+    quiet: bool,
+    write_path: Path | None = None,
+) -> None:
     """Map-reduce over many files in one call — see reduce.py's module docstring."""
     from . import reduce as reduce_mod
 
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
+    before_mtime = _mtime(write_path) if write_path else None
     try:
-        message_history, _ = await reduce_mod.run_reduce(
+        message_history, final_text = await reduce_mod.run_reduce(
             cfg, prompt, pattern, message_history, usage_limits, quiet=quiet
         )
     except Exception as e:  # noqa: BLE001
         ui.print_error(_friendly_error(e))
         raise SystemExit(1) from e
+    _apply_write_fallback(write_path, before_mtime, final_text, quiet=quiet)
     save_session(cfg, message_history)
 
 
@@ -194,6 +263,15 @@ def build_parser() -> argparse.ArgumentParser:
         "For a caller that shouldn't act on a confidently-wrong-but-clean answer. "
         "Implies --quiet's stdout contract; ignored with -c/--continue (verification "
         "needs an independent re-derivation, not a continued conversation).",
+    )
+    parser.add_argument(
+        "--write", metavar="PATH", default=None,
+        help="one-shot/--reduce only: PATH the run is expected to write via its own "
+        "write_file call. If PATH's mtime is unchanged when the turn ends — the "
+        "model answered in text instead of actually calling the tool, or the "
+        "tool call itself failed — tcode writes the model's final answer there "
+        "directly, so a caller with one known output path doesn't depend on the "
+        "model's own write succeeding. Relative to this directory.",
     )
     parser.add_argument(
         "--reduce", metavar="PATTERN", default=None,
@@ -239,14 +317,22 @@ def main() -> None:
         asyncio.run(verify_mode(cfg, prompt))
         return
 
+    try:
+        write_path = _resolve_write_path(cfg, args.write) if args.write else None
+    except ConfigError as e:
+        ui.print_error(str(e))
+        raise SystemExit(1) from e
+
     message_history = load_latest_session(cfg) if args.cont else []
 
     if prompt and args.reduce:
-        asyncio.run(reduce_mode(cfg, prompt, args.reduce, message_history, quiet=args.quiet))
+        asyncio.run(
+            reduce_mode(cfg, prompt, args.reduce, message_history, quiet=args.quiet, write_path=write_path)
+        )
         return
 
     if prompt:
-        asyncio.run(one_shot(cfg, prompt, message_history, quiet=args.quiet))
+        asyncio.run(one_shot(cfg, prompt, message_history, quiet=args.quiet, write_path=write_path))
     else:
         asyncio.run(interactive(cfg, message_history))
 
