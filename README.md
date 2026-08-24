@@ -255,32 +255,33 @@ context-window problem — it reproduces even when each individual item is
 small. It's the model deciding a multi-item task looks too big and bailing
 before actually running out of anything.
 
-The fix is external, not a flag: drive it with a script that calls `tcode`
-once per item — a plain shell loop, one headless call per file — rather
-than one call handling a list. A three-stage version scales to any input
-size:
+`--reduce PATTERN` handles this internally rather than pushing the
+workaround onto whatever's calling tcode — a caller with a batch task
+should be able to invoke tcode the same way it would for a single file and
+let tcode sort out how many internal steps that actually takes, the same
+principle `--verify` follows for a different problem:
 
 ```bash
-# 1. map — one tcode call per source file, never a batch
-for f in data/*.md; do
-  tcode "Use read_and_distill on $f to extract <what you need>. \
-    Write ONLY that to summaries/$(basename "$f") via write_file."
-done
-
-# 2. combine — plain shell, no model call, can't fail
-cat summaries/*.md > combined.md
-
-# 3. reduce — one tcode call, one file in
-tcode "Read combined.md and write the final summary to output.md."
+tcode --reduce "data/*.md" "Summarize each file's key points, then write one combined report."
+tcode --reduce "logs/**/*.log" "Find every ERROR line and group them by cause."
 ```
 
-If a single combine step is still too large for one reduce call, repeat
-the map step one level up (per-group digests, then combine those) rather
-than asking one turn to read everything at once — validated up to 39 files
-across 5 groups this way. Each map-step call is independent, so a script
-driving this should check the expected output file exists after each call
-and retry once if not, rather than assume success; individual calls are
-reliable but not perfect.
+Internally: one distillation call per matched file, run concurrently
+(`throttle()` still paces the underlying requests — this isn't a way
+around the rate limit, just not waiting on each file before starting the
+next); grouped by parent directory and digested first if there are more
+files than one reduce turn has been tested reliable for; one final,
+ordinary tcode turn (full capabilities, can `write_file` if the prompt
+asks for that) over the collected result. Validated end-to-end on 56 real
+files across 5 directories, both the per-directory grouping and a
+same-directory group large enough to need further chunking.
+
+`@listfile` (a path prefixed with `@`, read as one file/glob per line,
+`#`-comments and blank lines ignored) takes an explicit file list instead
+of a glob, for selection logic a glob can't express — a caller's own
+date-range filter, say. The caller keeps owning that logic and just hands
+tcode the resulting list; tcode doesn't need to learn what "the last 14
+days" means for someone else's files.
 
 ## Extending
 
@@ -289,11 +290,17 @@ Everything is one file each in `src/`:
 - `config.py` — `.env` loading, on-disk layout
 - `agent.py` — which harness capabilities are wired in
 - `web.py` — the web search/fetch tools (see "Web search" above)
+- `files.py` / `distill.py` — the large-file distillation tool and its
+  shared model, also used by `web.py`
+- `verify.py` — `--verify`'s independent-verifier decision mode
+- `reduce.py` — `--reduce`'s internal map-reduce over many files
 - `guardrails.py` — technical backstops for instructions the model doesn't
   reliably follow on its own
 - `ratelimit.py` — shared cross-process RPM throttle
 - `sessions.py` — conversation save/resume
 - `ui.py` — terminal rendering
+- `runner.py` — the single-turn execution loop (`cli.py` and `reduce.py`
+  both use it)
 - `cli.py` — argument parsing and the REPL loop
 
 To add a capability (a Playwright browser, spend limits, skills), import it
