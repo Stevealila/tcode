@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 import time
@@ -86,15 +87,25 @@ async def run_turn(
     cfg: Config,
     *,
     quiet: bool = False,
-) -> list[ModelMessage]:
+    capture: bool = False,
+) -> tuple[list[ModelMessage], str]:
     """Run one turn, streaming assistant text and tool activity live.
+
+    Returns `(message_history, final_text)`.
 
     `quiet` routes tool-call/result lines, the usage footer, and notices to
     stderr instead of stdout — the model's actual text output is unaffected
     either way. For a scripted, non-interactive caller parsing stdout for a
     clean answer (a JSON decision, say), this is the difference between a
     parseable result and one interleaved with rendering it never asked for.
+
+    `capture` additionally holds the answer text back from stdout entirely
+    (still returned in `final_text`) — implies `quiet`-style routing for
+    diagnostics too. For a caller (verify.py) that needs to see the answer
+    *before* deciding whether it should reach stdout at all — printing it
+    live and then "unprinting" it isn't possible.
     """
+    quiet = quiet or capture
     start = time.monotonic()
     streaming_text = False
     final_text_parts: list[str] = []
@@ -125,12 +136,14 @@ async def run_turn(
                         if text:
                             streaming_text = True
                             final_text_parts.append(text)
-                            sys.stdout.write(text)
-                            sys.stdout.flush()
+                            if not capture:
+                                sys.stdout.write(text)
+                                sys.stdout.flush()
             elif Agent.is_call_tools_node(node):
                 if streaming_text:
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                    if not capture:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
                     streaming_text = False
                 async with node.stream(run.ctx) as stream:
                     async for event in stream:
@@ -151,7 +164,7 @@ async def run_turn(
                             )
                             ui.render_tool_result(event.part.tool_name, content, is_error, quiet=quiet)
 
-        if streaming_text:
+        if streaming_text and not capture:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
@@ -161,7 +174,8 @@ async def run_turn(
     usage = result.usage
     ui.render_usage(usage.cost, usage.total_tokens, elapsed, quiet=quiet)
 
-    if _skipped_reading_files(tool_names, "".join(final_text_parts)):
+    final_text = "".join(final_text_parts)
+    if _skipped_reading_files(tool_names, final_text):
         ui.print_notice(
             "note: that answer didn't read any file contents "
             f"(only used: {', '.join(sorted(tool_names))}) — treat it as a "
@@ -169,7 +183,7 @@ async def run_turn(
             quiet=quiet,
         )
 
-    return result.all_messages()
+    return result.all_messages(), final_text
 
 
 async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
@@ -208,7 +222,7 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
             continue
 
         try:
-            message_history = await run_turn(agent, user_input, message_history, usage_limits, cfg)
+            message_history, _ = await run_turn(agent, user_input, message_history, usage_limits, cfg)
         except KeyboardInterrupt:
             ui.print_notice("interrupted")
             continue
@@ -227,11 +241,54 @@ async def one_shot(
     agent = build_agent(cfg)
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
     try:
-        message_history = await run_turn(agent, prompt, message_history, usage_limits, cfg, quiet=quiet)
+        message_history, _ = await run_turn(agent, prompt, message_history, usage_limits, cfg, quiet=quiet)
     except Exception as e:  # noqa: BLE001
         ui.print_error(_friendly_error(e))
         raise SystemExit(1) from e
     save_session(cfg, message_history)
+
+
+async def verify_mode(cfg: Config, prompt: str) -> None:
+    """Independent-verifier decision mode — see verify.py's module docstring.
+
+    On agreement, prints the primary's answer to stdout, same contract as
+    `--quiet`. On disagreement, prints *nothing* to stdout and exits 2 —
+    deliberately not a hedge, a pick-one, or an error message on stdout: a
+    caller built around "stdout has a clean answer or it doesn't" (e.g.
+    scanning for the first parseable JSON object) already treats empty/
+    unparseable stdout as "this attempt produced nothing usable" and moves
+    to its own fallback — which is exactly the right response to a verifier
+    disagreement too. Inventing a different signal would need every such
+    caller to learn a second failure shape for what is, to them, the same
+    situation: no trustworthy answer this attempt.
+    """
+    from . import verify as verify_mod
+
+    agent = build_agent(cfg)
+    usage_limits = UsageLimits(request_limit=cfg.request_limit)
+    timeout = int(os.environ.get("TCODE_VERIFY_TIMEOUT", "150"))
+
+    try:
+        _, primary_text = await run_turn(agent, prompt, [], usage_limits, cfg, capture=True)
+        verifier_text = await verify_mod.get_verifier_answer(cfg, prompt, usage_limits, timeout)
+        agreed, verdict = await verify_mod.compare(cfg, primary_text, verifier_text)
+    except Exception as e:  # noqa: BLE001
+        ui.print_error(_friendly_error(e))
+        raise SystemExit(1) from e
+
+    ui.print_notice(f"verify: primary={primary_text!r}", quiet=True)
+    ui.print_notice(f"verify: verifier={verifier_text!r}", quiet=True)
+    ui.print_notice(f"verify: verdict={verdict!r}", quiet=True)
+
+    if agreed:
+        sys.stdout.write(primary_text)
+        if not primary_text.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+        return
+
+    ui.print_notice("verify: DISAGREEMENT — withholding the answer (stdout empty, exit 2)", quiet=True)
+    raise SystemExit(2)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,6 +313,15 @@ def build_parser() -> argparse.ArgumentParser:
         "notices to stderr instead of stdout, so stdout is just the model's answer "
         "— for a script parsing the output (a JSON decision, say), not a human",
     )
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="one-shot mode only: get the answer, independently re-derive it with a "
+        "different model (or TCODE_VERIFY_CMD, an external command) and only print "
+        "it if they agree — stdout is empty and the exit code is 2 on disagreement. "
+        "For a caller that shouldn't act on a confidently-wrong-but-clean answer. "
+        "Implies --quiet's stdout contract; ignored with -c/--continue (verification "
+        "needs an independent re-derivation, not a continued conversation).",
+    )
     return parser
 
 
@@ -273,9 +339,22 @@ def main() -> None:
         ui.show_sessions(list_sessions(cfg))
         return
 
-    message_history = load_latest_session(cfg) if args.cont else []
-
     prompt = " ".join(args.prompt).strip()
+    if not prompt and not sys.stdin.isatty():
+        # No positional prompt, and stdin isn't a terminal: something's
+        # piped in (`echo "..." | tcode`, or a caller passing the prompt as
+        # subprocess `input=` — Claude Code's own `-p` accepts a prompt
+        # either way, and brain_call.py-shaped Python callers already use
+        # `input=` uniformly for every provider they invoke). Falling
+        # through to the interactive REPL here would hang forever reading
+        # from a pipe that's never going to send REPL commands.
+        prompt = sys.stdin.read().strip()
+
+    if prompt and args.verify:
+        asyncio.run(verify_mode(cfg, prompt))
+        return
+
+    message_history = load_latest_session(cfg) if args.cont else []
     if prompt:
         asyncio.run(one_shot(cfg, prompt, message_history, quiet=args.quiet))
     else:

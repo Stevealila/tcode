@@ -89,6 +89,48 @@ see "Shell access" below), leaving `read_file`/`list_directory`/
 and `TCODE_WEB_SEARCH=0` for a fully read-only, no-side-effects session —
 diagnose, decide, report, touch nothing.
 
+The prompt can come via stdin instead of an argument too (`echo "..." |
+tcode`, or a subprocess `input=` from another language) — useful once the
+prompt is long enough that shell quoting gets awkward, or the caller
+already has it as a string in memory rather than something to shell-escape.
+
+### `--verify`: an independent second opinion before you trust the answer
+
+Clean output and correct scoping don't do anything about a *confidently
+wrong* answer — a model can call every tool correctly and still misread
+its own inputs, and nothing about `--quiet`/`TCODE_READONLY` catches that.
+For an answer something else is going to act on without a human reading it
+critically first (a script parsing a decision out of stdout), that's the
+failure mode that actually matters.
+
+`--verify` runs three passes instead of one: the real answer, an
+independent re-derivation from the same prompt (a different Groq model by
+default — deliberately not just another sample from the same model, which
+research on this specifically shows doesn't help when the error is a
+systematic blind spot rather than random noise — or `TCODE_VERIFY_CMD`, an
+external command for a cross-provider verifier when one's available), and
+a cheap pass judging whether they actually agree on the substance. Agree:
+stdout gets the real answer, same contract as `--quiet`. Disagree: stdout
+is empty and the exit code is 2 — deliberately not an error message or a
+hedge, so a caller already treating "no parseable answer" as "this attempt
+failed, try the next tier" (a retry, a fallback provider) handles
+disagreement correctly with no extra logic of its own.
+
+```bash
+echo "$PROMPT" | tcode --verify --model openai/gpt-oss-120b
+TCODE_VERIFY_MODEL=qwen/qwen3.6-27b tcode --verify "..."   # explicit verifier model
+TCODE_VERIFY_CMD="claude -p --model haiku --allowedTools Read Grep Glob Bash --disallowedTools Edit Write NotebookEdit" \
+  tcode --verify "..."                                     # external/cross-provider verifier
+```
+
+Best suited to a narrow, structured decision (classify this, decide this)
+where "agreement" has a clear meaning — two valid answers to an open-ended
+prompt can differ completely in wording and both be fine, which reads as
+disagreement to the comparison pass. `TCODE_VERIFY_TIMEOUT` (seconds,
+default 150) bounds the external-command path; `-c`/`--continue` is
+ignored with `--verify` since verification needs an independent
+re-derivation, not a continued conversation.
+
 ## How state is laid out
 
 Global state lives under `~/.tcode`, keyed per-project by the absolute
