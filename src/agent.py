@@ -47,6 +47,7 @@ from pydantic_ai_harness.memory import FileStore
 from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
 from .config import Config
+from .files import file_capabilities
 from .guardrails import scope_shell_exploration
 from .web import current_time_instructions, web_capabilities
 
@@ -68,7 +69,7 @@ answer unchanged.
 """
 
 
-def _coder_instructions(scratch_dir: Path, web_search: bool) -> str:
+def _coder_instructions(scratch_dir: Path, web_search: bool, request_limit: int) -> str:
     web_block = _WEB_INSTRUCTIONS if web_search else ""
     return f"""\
 You are tcode, a system-wide coding agent running directly in the user's
@@ -82,13 +83,33 @@ diffs and command output speak for themselves. When a task is ambiguous in a
 way that materially changes what you'd build, ask one focused question
 before proceeding, otherwise just proceed.
 
-You are running against a rate-limited API budget, so be economical with
-tool output: prefer your own file-system tools (list_directory, read_file,
-find_files) over shell commands like `ls -R`, `find`, or `cat` for exploring
-or dumping file contents, since they're already scoped and bounded and raw
-shell output isn't. Don't run a broad recursive listing when a targeted one
-answers the question. Never re-paste large tool output back to the user in
-your reply; describe or summarize it instead.
+Be economical with tool output: prefer your own file-system tools
+(list_directory, read_file, find_files) over shell commands like `ls -R`,
+`find`, or `cat` for exploring or dumping file contents, since they're
+already scoped and bounded and raw shell output isn't. Don't run a broad
+recursive listing when a targeted one answers the question. Never re-paste
+large tool output back to the user in your reply; describe or summarize it
+instead.
+
+Your real budget for one turn is {request_limit} tool-call round-trips —
+generous for a task that means reading or processing many files in
+sequence (a batch job over a whole directory, say). That's expected and
+normal, not something to avoid or apologize for: work through the entire
+list. Don't stop partway and claim you're low on budget/tokens/quota unless
+you've actually gotten close to the number above — and never state that you
+checked, read, or found nothing in something you didn't actually call a
+tool on; if you're stopping before finishing a multi-item task, say exactly
+which items you covered and which you didn't, rather than implying full
+coverage.
+
+read_file silently truncates a large file from the middle past a few
+thousand characters — real enough content just isn't there for you to see,
+with nothing telling you that. For a large file (a long note, a log, a data
+dump) where you need a specific answer rather than the file's literal
+bytes, use read_and_distill(path, prompt) instead: state exactly what
+you're looking for and it returns just that, read in full first. Keep using
+read_file for anything you need to see or edit verbatim (source code,
+configs) — a distilled paraphrase can't stand in for the actual text there.
 
 When the user asks about something that isn't the current workspace (e.g.
 "the X repo", a package to inspect, a URL to fetch), resolve it the direct
@@ -137,7 +158,7 @@ def build_agent(cfg: Config) -> Agent:
     capabilities = [
         Capability(
             instructions=[
-                _coder_instructions(cfg.scratch_dir, cfg.web_search),
+                _coder_instructions(cfg.scratch_dir, cfg.web_search, cfg.request_limit),
                 # A weak model's sense of "now" defaults to its training
                 # cutoff, not the wall clock — evaluated per run (not baked
                 # in once here) so a long-lived session stays correct across
@@ -153,6 +174,10 @@ def build_agent(cfg: Config) -> Agent:
         ),
         RepoContext(workspace_dir=cfg.cwd),
         Planning(),
+        # Always on, unlike web_capabilities: this is a FileSystem gap
+        # (large local files), not something that needs an external
+        # capability or API key. See files.py's module docstring.
+        *file_capabilities(cfg, provider),
     ]
     if cfg.web_search:
         capabilities += web_capabilities(cfg, provider)

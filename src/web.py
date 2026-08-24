@@ -51,46 +51,21 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic_ai import Agent, Tool
+from pydantic_ai import Tool
 from pydantic_ai.capabilities import Capability, WebFetch, WebSearch
 from pydantic_ai.common_tools.web_fetch import web_fetch_tool
 from pydantic_ai.messages import BinaryContent
-from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai_harness.guardrails import ToolGuardrail
 
 from .config import Config
+from .distill import make_distill_agent
 from .guardrails import prefer_web_fetch_tool
 from .ratelimit import throttle
-
-# Smallest/fastest model in Groq's current catalog: this is a narrow
-# extraction task (one page, one question), not agentic reasoning, so it
-# doesn't need the main model's capacity — and running it on a separate,
-# smaller model keeps this distillation pass cheap relative to the budget
-# the primary model's turn is already spending.
-_DISTILL_MODEL = "openai/gpt-oss-20b"
 
 # Below this, there's nothing worth filtering (e.g. a short JSON API
 # response) — skip the extra round-trip and return the raw content.
 _DISTILL_SKIP_CHARS = 800
-
-_DISTILL_INSTRUCTIONS = """\
-You read one fetched web page and answer one question about it for another
-agent, which will act on your answer without seeing the page itself.
-
-Quote the specific fact requested (a number, a date, a status) plus enough
-context to judge how current it is — the date it's attributed to, the
-source name. A number embedded in evergreen copy as a historical example
-("if the price were $X...") or clearly dated in the past is not the answer,
-even if it's the only number on the page — say the page doesn't have a
-current figure rather than reporting it as one.
-
-If the page is boilerplate, a JS/CSS shell, an error page, a paywall, or
-otherwise doesn't contain an answer to the question, say so plainly in one
-line. Never state a fact, a number, or a quote that isn't actually present
-in the page content below — the agent reading your answer cannot check your
-work against the original page.
-"""
 
 
 def current_time_instructions() -> str:
@@ -116,8 +91,7 @@ def _search_capability(cfg: Config) -> WebSearch:
 
 
 def _make_web_fetch_tool(cfg: Config, provider: GroqProvider) -> Tool:
-    distill_model = GroqModel(_DISTILL_MODEL, provider=provider)
-    distill_agent = Agent(distill_model, instructions=_DISTILL_INSTRUCTIONS)
+    distill_agent = make_distill_agent(provider)
     base_fetch = web_fetch_tool()
 
     async def web_fetch(url: str, prompt: str) -> str | BinaryContent:
