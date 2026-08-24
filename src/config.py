@@ -20,6 +20,7 @@ DEFAULT_TOOL_OUTPUT_MAX_CHARS = 2000
 DEFAULT_KEEP_TOOL_PAIRS = 3
 DEFAULT_CLEAR_AFTER_TOKENS = 3000
 DEFAULT_MAX_RPM = 30
+DEFAULT_WEB_SEARCH = True
 
 GLOBAL_DIR = Path.home() / ".tcode"
 
@@ -60,6 +61,8 @@ class Config:
     keep_tool_pairs: int
     clear_after_tokens: int
     max_rpm: int
+    web_search: bool
+    tavily_api_key: str | None
     rpm_state_file: Path
     project_slug: str
     project_dir: Path
@@ -124,6 +127,20 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     # every tcode invocation hitting this account. 0 disables it.
     max_rpm = int(os.environ.get("TCODE_MAX_RPM", DEFAULT_MAX_RPM))
 
+    # Web search/fetch: on by default, zero setup (DuckDuckGo search + a
+    # distilling fetch, see web.py). Set TCODE_WEB_SEARCH=0 to turn it off,
+    # e.g. if DuckDuckGo is rate-limiting or a project shouldn't touch the
+    # live web at all.
+    raw_web_search = os.environ.get("TCODE_WEB_SEARCH", "").strip().lower()
+    web_search = raw_web_search not in ("0", "false", "no") if raw_web_search else DEFAULT_WEB_SEARCH
+
+    # Optional upgrade over DuckDuckGo's free-text scrape: Tavily is a
+    # search API built for LLM/agent consumption (clean extracted content,
+    # a finance/news topic mode) rather than raw SERP snippets. Free tier,
+    # no card required — get a key at https://app.tavily.com. Auto-detected
+    # by presence, same as GROQ_API_KEY; DuckDuckGo is the fallback when unset.
+    tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip() or None
+
     slug = _slugify(cwd)
     project_dir = GLOBAL_DIR / "projects" / slug
     memory_dir = GLOBAL_DIR / "memory"
@@ -152,6 +169,8 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         keep_tool_pairs=keep_tool_pairs,
         clear_after_tokens=clear_after_tokens,
         max_rpm=max_rpm,
+        web_search=web_search,
+        tavily_api_key=tavily_api_key,
         rpm_state_file=GLOBAL_DIR / "rpm_state",
         project_slug=slug,
         project_dir=project_dir,

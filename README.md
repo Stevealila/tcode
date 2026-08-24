@@ -38,6 +38,8 @@ GROQ_MODEL=openai/gpt-oss-120b     # optional, this is the default
 GROQ_REQUEST_LIMIT=50              # optional, caps tool-call round-trips per turn
 TCODE_ALLOWED_COMMANDS=git,pytest  # optional, see "Shell access" below
 TCODE_MAX_RPM=30                   # optional, client-side requests/min throttle (0 disables)
+TCODE_WEB_SEARCH=1                 # optional, web search/fetch tools (default on, 0 disables)
+TAVILY_API_KEY=tvly-...            # optional, better web search — see "Web search" below
 ```
 
 Get a key at <https://console.groq.com/keys>. Real environment variables
@@ -45,9 +47,10 @@ exported in your shell always take precedence over both `.env` files;
 a project's `.env` takes precedence over the global one.
 
 Good Groq models for this kind of agentic/tool-calling work: `openai/gpt-oss-120b`
-(default, 131K context, fast, cheap), `moonshotai/kimi-k2-instruct-0905`
-(bigger, stronger at long agentic tool-use, 256K context), or
-`llama-3.3-70b-versatile`.
+(default, 131K context) or `qwen/qwen3.6-27b` (an alternative worth
+comparing on your workload). Check `GET /openai/v1/models` against your own
+key before picking one — Groq's catalog changes, and a model that's current
+today may be gone in a few months.
 
 ## Use
 
@@ -57,7 +60,7 @@ tcode                       # interactive session, rooted at this directory
 tcode "fix the failing test in tests/test_x.py"   # one-shot, prints and exits
 tcode -c                    # continue the last session in this directory
 tcode --sessions            # list saved sessions for this directory
-tcode --model llama-3.3-70b-versatile
+tcode --model qwen/qwen3.6-27b
 ```
 
 Slash commands inside an interactive session:
@@ -103,6 +106,36 @@ Either way, this is a guardrail against accidents, not a sandbox boundary:
 allowed commands can still spawn arbitrary subprocesses. Don't point this at
 a directory you don't trust an agent to have shell access to.
 
+## Web search
+
+On by default, no API key needed: a search tool (DuckDuckGo) and a fetch
+tool that reads a URL and distills it down to whatever you actually asked
+for, rather than dumping the raw page. Set `TCODE_WEB_SEARCH=0` to turn both
+off for a project that shouldn't touch the live web.
+
+DuckDuckGo's free-text search is the zero-setup default, but its snippets
+are often stale for "what's the current X" questions — static page copy with
+an old example number or date baked in, not what the page shows live. Set
+`TAVILY_API_KEY` to switch the search tool to [Tavily](https://app.tavily.com)
+instead: a search API built for LLM/agent use (cleaner extracted content,
+a finance/news topic mode), with a free tier (1,000 searches/month, no card)
+that fits the same "works without a subscription" goal as everything else
+here. This mirrors how other agent harnesses (OpenClaw, for one) pick a
+search backend: prefer a real search API when a key for one is configured,
+fall back to a scrape when it isn't.
+
+The fetch tool always distills, regardless of which search backend found the
+URL: the page is fetched and converted to markdown, then a second, cheap
+Groq call (`openai/gpt-oss-20b`) reads it against the specific question the
+model asked for and returns just that — the same two-stage shape Claude
+Code's own `WebFetch` uses (a full fetch, then a small model extracting the
+answer), reverse-engineered from its public tool description since this
+harness has no equivalent server-side infrastructure to lean on. It also
+means the model doesn't get to hallucinate a citation from a page that
+failed to load or a JS-only page that fetched as boilerplate — that model
+is instructed to say plainly when the answer isn't on the page, rather than
+pass along noise for the (weaker, more confident) main model to run with.
+
 ## Rate limits & context management
 
 Groq's free tier is tight: 8,000 tokens/minute and 30 requests/minute for
@@ -140,11 +173,14 @@ Everything is one file each in `src/`:
 
 - `config.py` — `.env` loading, on-disk layout
 - `agent.py` — which harness capabilities are wired in
+- `web.py` — the web search/fetch tools (see "Web search" above)
+- `guardrails.py` — technical backstops for instructions the model doesn't
+  reliably follow on its own
 - `ratelimit.py` — shared cross-process RPM throttle
 - `sessions.py` — conversation save/resume
 - `ui.py` — terminal rendering
 - `cli.py` — argument parsing and the REPL loop
 
-To add a capability (web search, a Playwright browser, spend limits,
-skills), import it from `pydantic_ai_harness` in `agent.py` and add it to
-the `capabilities=[...]` list.
+To add a capability (a Playwright browser, spend limits, skills), import it
+from `pydantic_ai_harness` (or `pydantic_ai.capabilities`, like the built-in
+web search) in `agent.py` and add it to the `capabilities=[...]` list.

@@ -48,9 +48,28 @@ from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Trunc
 
 from .config import Config
 from .guardrails import scope_shell_exploration
+from .web import current_time_instructions, web_capabilities
 
 
-def _coder_instructions(scratch_dir: Path) -> str:
+_WEB_INSTRUCTIONS = """
+For a current/live fact you don't already know for certain (a price, a
+score, today's news, a package's latest version, etc.), search the web and
+then fetch a promising result — not shell commands like `curl`/`wget`,
+which return a page's raw HTML/JS rather than what `web_fetch` gives you.
+`web_fetch` takes the specific question you need answered, not just the
+URL, and tells you plainly when the page doesn't have it — when that
+happens (or a fetch fails outright), try another result or a different
+query rather than answering from the search snippet alone or giving up
+after one attempt. If you still don't have it after that, say so — never
+state a specific current number, date, or source you're not actually sure
+is real. If the user asks again (e.g. "how about today?"), that's a
+request to actually retry, not to repeat the same "I couldn't get it"
+answer unchanged.
+"""
+
+
+def _coder_instructions(scratch_dir: Path, web_search: bool) -> str:
+    web_block = _WEB_INSTRUCTIONS if web_search else ""
     return f"""\
 You are tcode, a system-wide coding agent running directly in the user's
 terminal, in the current project's working directory. You have full
@@ -93,7 +112,7 @@ reading the actual contents of its most relevant source files, not just
 listing the directory tree. A file tree with generic advice ("add tests",
 "add CI") is not a review; cite real files, real lines, and specific
 behavior you found by reading the code.
-"""
+{web_block}"""
 
 
 def _explorer(workspace: str | Path) -> SubAgent:
@@ -116,7 +135,16 @@ def build_agent(cfg: Config) -> Agent:
 
     workspace = str(cfg.cwd)
     capabilities = [
-        Capability(instructions=_coder_instructions(cfg.scratch_dir)),
+        Capability(
+            instructions=[
+                _coder_instructions(cfg.scratch_dir, cfg.web_search),
+                # A weak model's sense of "now" defaults to its training
+                # cutoff, not the wall clock — evaluated per run (not baked
+                # in once here) so a long-lived session stays correct across
+                # a day boundary. See web.py's module docstring.
+                current_time_instructions,
+            ]
+        ),
         FileSystem(workspace),
         Shell(
             cwd=workspace,
@@ -125,6 +153,10 @@ def build_agent(cfg: Config) -> Agent:
         ),
         RepoContext(workspace_dir=cfg.cwd),
         Planning(),
+    ]
+    if cfg.web_search:
+        capabilities += web_capabilities(cfg, provider)
+    capabilities += [
         SubAgents(agents=[_explorer(workspace)], agent_folders=None),
         # Technical backstop for the "scope exploration" instruction above:
         # observed behavior shows the model doesn't always follow it. See
@@ -161,4 +193,18 @@ def build_agent(cfg: Config) -> Agent:
         # than fail the whole CLI.
         pass
 
-    return Agent(model, capabilities=capabilities)
+    return Agent(
+        model,
+        capabilities=capabilities,
+        # Pydantic AI's default tool-retry budget is 1, counted per tool name
+        # for the whole run (not per call): a second ModelRetry from the same
+        # tool anywhere in the run — e.g. web_fetch hitting a 403 on one URL,
+        # then a timeout on a different one — raises UnexpectedModelBehavior
+        # and kills the turn outright instead of letting the model try
+        # another source. Real web research hits exactly this (flaky sites,
+        # anti-bot blocks). `request_limit` (see cli.py) already caps total
+        # round-trips per turn, so a higher per-tool budget doesn't risk an
+        # unbounded loop — it just survives the kind of transient failures a
+        # human would also just retry past.
+        retries={"tools": 3},
+    )

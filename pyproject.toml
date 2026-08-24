@@ -5,7 +5,7 @@ description = "A system-wide terminal coding-agent harness powered by Groq model
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "pydantic-ai-slim[groq]>=2.33.0",
+  "pydantic-ai-slim[groq,duckduckgo,web-fetch,tavily]>=2.33.0",
   "pydantic-ai-harness>=0.24.0",
   "python-dotenv>=1.0.1",
   "rich>=13.9.4",
