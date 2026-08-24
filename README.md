@@ -61,6 +61,7 @@ tcode "fix the failing test in tests/test_x.py"   # one-shot, prints and exits
 tcode -c                    # continue the last session in this directory
 tcode --sessions            # list saved sessions for this directory
 tcode --model qwen/qwen3.6-27b
+tcode --quiet "summarize today's log" > answer.txt   # one-shot, clean stdout
 ```
 
 Slash commands inside an interactive session:
@@ -70,6 +71,23 @@ Slash commands inside an interactive session:
 - `/memory` — show what's currently in the global memory notebook
 - `/sessions` — list saved sessions for this project
 - `/exit`, `/quit` — leave (Ctrl-D also works)
+
+## Scripted / non-interactive use
+
+One-shot mode normally interleaves tool-call activity, a usage footer, and
+notices with the model's actual answer on stdout — fine to watch, awkward
+to parse. `--quiet` (`-q`) routes all of that to stderr instead, so stdout
+is exactly the model's text output and nothing else — for a caller that
+runs `tcode` as a subprocess and parses stdout (extracting a JSON decision,
+say), not a human watching the terminal.
+
+Pair it with `TCODE_READONLY=1` for a task that should look but never
+touch: it removes `write_file`/`edit_file`/`create_directory` from the
+model's tool list entirely (same mechanism as `TCODE_SHELL=0` for Shell —
+see "Shell access" below), leaving `read_file`/`list_directory`/
+`find_files`/`read_and_distill` untouched. Combine with `TCODE_SHELL=0`
+and `TCODE_WEB_SEARCH=0` for a fully read-only, no-side-effects session —
+diagnose, decide, report, touch nothing.
 
 ## How state is laid out
 

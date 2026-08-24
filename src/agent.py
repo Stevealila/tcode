@@ -74,20 +74,33 @@ answer unchanged.
 """
 
 
-def _coder_instructions(scratch_dir: Path, web_search: bool, request_limit: int, shell: bool) -> str:
+def _coder_instructions(
+    scratch_dir: Path, web_search: bool, request_limit: int, shell: bool, readonly: bool
+) -> str:
     web_block = _WEB_INSTRUCTIONS if web_search else ""
+
+    if readonly:
+        files_line = (
+            "You have read-only workspace file access — list_directory/read_file/"
+            "find_files/search_files/read_and_distill — but no write_file, "
+            "edit_file, or create_directory this session: those tools don't "
+            "exist. You can look and reason, never change anything on disk."
+        )
+    else:
+        files_line = (
+            "You have full workspace-rooted file access — read_file/write_file/"
+            "edit_file/list_directory/find_files/search_files/read_and_distill."
+        )
     shell_line = (
-        "You have full workspace-rooted file access and a real shell: use "
-        "whatever CLI tools are appropriate (git, gh, package managers, "
-        "language toolchains, etc.), don't assume you're restricted to a "
-        "small fixed set."
+        " You also have a real shell: use whatever CLI tools are appropriate "
+        "(git, gh, package managers, language toolchains, etc.), don't assume "
+        "you're restricted to a small fixed set."
         if shell
-        else "You have workspace-rooted file access — read_file/write_file/"
-        "edit_file/list_directory/find_files/search_files/read_and_distill "
-        "— but no shell in this session: there's no run_command tool, so "
-        "don't reach for CLI equivalents (git, gh, etc.) of things your "
-        "own file tools already cover."
+        else " There's no shell this session — no run_command tool exists, so "
+        "don't reach for CLI equivalents (git, gh, etc.) of things your own "
+        "file tools already cover."
     )
+    shell_line = files_line + shell_line
     gh_block = (
         f"""
 
@@ -178,7 +191,9 @@ def build_agent(cfg: Config) -> Agent:
     capabilities = [
         Capability(
             instructions=[
-                _coder_instructions(cfg.scratch_dir, cfg.web_search, cfg.request_limit, cfg.shell),
+                _coder_instructions(
+                    cfg.scratch_dir, cfg.web_search, cfg.request_limit, cfg.shell, cfg.readonly
+                ),
                 # A weak model's sense of "now" defaults to its training
                 # cutoff, not the wall clock — evaluated per run (not baked
                 # in once here) so a long-lived session stays correct across
@@ -186,7 +201,7 @@ def build_agent(cfg: Config) -> Agent:
                 current_time_instructions,
             ]
         ),
-        FileSystem(workspace),
+        FileSystem(workspace, read_only=cfg.readonly),
         RepoContext(workspace_dir=cfg.cwd),
         Planning(),
         # Always on, unlike web_capabilities: this is a FileSystem gap

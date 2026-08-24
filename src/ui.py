@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from rich.console import Console
@@ -10,6 +11,18 @@ from rich.markdown import Markdown
 from .config import Config
 
 console = Console(highlight=False)
+# Tool-call activity, the usage footer, and notices are diagnostics, not the
+# answer — a scripted caller (parsing stdout for a clean model response, the
+# way brain_call.call() parses a JSON decision out of headless claude's
+# stdout) needs a way to keep them off stdout without losing them entirely.
+# --quiet routes them here instead of dropping them; the model's actual text
+# output is untouched either way. Rich auto-detects a non-tty file() and
+# skips ANSI codes on its own, so no extra config needed for piped output.
+console_err = Console(highlight=False, file=sys.stderr)
+
+
+def _out(quiet: bool) -> Console:
+    return console_err if quiet else console
 
 BANNER = """\
 [bold cyan]tcode[/bold cyan] [dim]— an alternative to Claude Code, running on Groq[/dim]
@@ -46,29 +59,33 @@ def print_help() -> None:
 
 
 def print_error(message: str) -> None:
-    console.print(f"[bold red]error:[/bold red] {message}")
+    # Always stderr, quiet or not: an error is never the answer a scripted
+    # caller is parsing for, and an interactive user still sees stderr by
+    # default without redirection.
+    console_err.print(f"[bold red]error:[/bold red] {message}")
 
 
-def print_notice(message: str) -> None:
-    console.print(f"[dim]{message}[/dim]")
+def print_notice(message: str, *, quiet: bool = False) -> None:
+    _out(quiet).print(f"[dim]{message}[/dim]")
 
 
-def render_tool_call(tool_name: str, args: dict) -> None:
+def render_tool_call(tool_name: str, args: dict, *, quiet: bool = False) -> None:
     arg_str = ", ".join(f"{k}={_short(v)}" for k, v in args.items())
-    console.print(f"[cyan]›[/cyan] [bold]{tool_name}[/bold]({arg_str})")
+    _out(quiet).print(f"[cyan]›[/cyan] [bold]{tool_name}[/bold]({arg_str})")
 
 
-def render_tool_result(tool_name: str, content: object, is_error: bool) -> None:
+def render_tool_result(tool_name: str, content: object, is_error: bool, *, quiet: bool = False) -> None:
     text = _short(content, limit=240)
+    out = _out(quiet)
     if is_error:
-        console.print(f"  [red]✗ {tool_name}: {text}[/red]")
+        out.print(f"  [red]✗ {tool_name}: {text}[/red]")
     else:
-        console.print(f"  [dim green]✓ {text}[/dim green]")
+        out.print(f"  [dim green]✓ {text}[/dim green]")
 
 
-def render_usage(cost: object, total_tokens: int, elapsed: float) -> None:
+def render_usage(cost: object, total_tokens: int, elapsed: float, *, quiet: bool = False) -> None:
     cost_str = f"${cost:.4f}" if cost is not None else "n/a"
-    console.print(
+    _out(quiet).print(
         f"[dim]{total_tokens} tokens · {cost_str} · {elapsed:.1f}s[/dim]"
     )
 

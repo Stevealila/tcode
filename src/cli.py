@@ -84,8 +84,17 @@ async def run_turn(
     message_history: list[ModelMessage],
     usage_limits: UsageLimits,
     cfg: Config,
+    *,
+    quiet: bool = False,
 ) -> list[ModelMessage]:
-    """Run one turn, streaming assistant text and tool activity live."""
+    """Run one turn, streaming assistant text and tool activity live.
+
+    `quiet` routes tool-call/result lines, the usage footer, and notices to
+    stderr instead of stdout — the model's actual text output is unaffected
+    either way. For a scripted, non-interactive caller parsing stdout for a
+    clean answer (a JSON decision, say), this is the difference between a
+    parseable result and one interleaved with rendering it never asked for.
+    """
     start = time.monotonic()
     streaming_text = False
     final_text_parts: list[str] = []
@@ -100,7 +109,8 @@ async def run_turn(
                     cfg.rpm_state_file,
                     cfg.max_rpm,
                     on_wait=lambda w: ui.print_notice(
-                        f"rate limit: waiting {w:.0f}s ({cfg.max_rpm} requests/min budget)"
+                        f"rate limit: waiting {w:.0f}s ({cfg.max_rpm} requests/min budget)",
+                        quiet=quiet,
                     ),
                 )
                 async with node.stream(run.ctx) as stream:
@@ -131,7 +141,7 @@ async def run_turn(
                                 args = part.args_as_dict()
                             except Exception:
                                 args = {}
-                            ui.render_tool_call(part.tool_name, args)
+                            ui.render_tool_call(part.tool_name, args, quiet=quiet)
                         elif isinstance(event, FunctionToolResultEvent):
                             is_error = isinstance(event.part, RetryPromptPart)
                             content = (
@@ -139,7 +149,7 @@ async def run_turn(
                                 if event.content is not None
                                 else event.part.content
                             )
-                            ui.render_tool_result(event.part.tool_name, content, is_error)
+                            ui.render_tool_result(event.part.tool_name, content, is_error, quiet=quiet)
 
         if streaming_text:
             sys.stdout.write("\n")
@@ -149,13 +159,14 @@ async def run_turn(
 
     elapsed = time.monotonic() - start
     usage = result.usage
-    ui.render_usage(usage.cost, usage.total_tokens, elapsed)
+    ui.render_usage(usage.cost, usage.total_tokens, elapsed, quiet=quiet)
 
     if _skipped_reading_files(tool_names, "".join(final_text_parts)):
         ui.print_notice(
             "note: that answer didn't read any file contents "
             f"(only used: {', '.join(sorted(tool_names))}) — treat it as a "
-            "directory-level impression, not a code review."
+            "directory-level impression, not a code review.",
+            quiet=quiet,
         )
 
     return result.all_messages()
@@ -210,11 +221,13 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
     ui.print_notice("bye")
 
 
-async def one_shot(cfg: Config, prompt: str, message_history: list[ModelMessage]) -> None:
+async def one_shot(
+    cfg: Config, prompt: str, message_history: list[ModelMessage], *, quiet: bool = False
+) -> None:
     agent = build_agent(cfg)
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
     try:
-        message_history = await run_turn(agent, prompt, message_history, usage_limits, cfg)
+        message_history = await run_turn(agent, prompt, message_history, usage_limits, cfg, quiet=quiet)
     except Exception as e:  # noqa: BLE001
         ui.print_error(_friendly_error(e))
         raise SystemExit(1) from e
@@ -237,6 +250,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sessions", action="store_true", help="list saved sessions for this directory and exit"
     )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="one-shot mode only: send tool-call activity, the usage footer, and "
+        "notices to stderr instead of stdout, so stdout is just the model's answer "
+        "— for a script parsing the output (a JSON decision, say), not a human",
+    )
     return parser
 
 
@@ -258,7 +277,7 @@ def main() -> None:
 
     prompt = " ".join(args.prompt).strip()
     if prompt:
-        asyncio.run(one_shot(cfg, prompt, message_history))
+        asyncio.run(one_shot(cfg, prompt, message_history, quiet=args.quiet))
     else:
         asyncio.run(interactive(cfg, message_history))
 

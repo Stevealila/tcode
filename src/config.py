@@ -22,6 +22,7 @@ DEFAULT_CLEAR_AFTER_TOKENS = 3000
 DEFAULT_MAX_RPM = 30
 DEFAULT_WEB_SEARCH = True
 DEFAULT_SHELL = True
+DEFAULT_READONLY = False
 
 GLOBAL_DIR = Path.home() / ".tcode"
 
@@ -59,6 +60,7 @@ class Config:
     request_limit: int
     allowed_commands: list[str]
     shell: bool
+    readonly: bool
     tool_output_max_chars: int
     keep_tool_pairs: int
     clear_after_tokens: int
@@ -119,6 +121,15 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     raw_shell = os.environ.get("TCODE_SHELL", "").strip().lower()
     shell = raw_shell not in ("0", "false", "no") if raw_shell else DEFAULT_SHELL
 
+    # Off by default (most sessions want to edit files), opt-in for a task
+    # that should look but never touch: a diagnosis, a decision, anything
+    # where the model reading the workspace is the point but write_file/
+    # edit_file/create_directory existing at all is not a risk worth taking.
+    # Shell (if also enabled) is unaffected — this scopes the FileSystem
+    # tools only, matching FileSystem's own read_only=True.
+    raw_readonly = os.environ.get("TCODE_READONLY", "").strip().lower()
+    readonly = raw_readonly not in ("", "0", "false", "no") if raw_readonly else DEFAULT_READONLY
+
     # Groq's lower tiers cap throughput at a few thousand tokens per minute,
     # so a single unbounded tool result (e.g. `ls -R` on a real repo) can
     # blow the whole request budget on its own, and a growing conversation
@@ -178,6 +189,7 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         request_limit=request_limit,
         allowed_commands=allowed_commands,
         shell=shell,
+        readonly=readonly,
         tool_output_max_chars=tool_output_max_chars,
         keep_tool_pairs=keep_tool_pairs,
         clear_after_tokens=clear_after_tokens,
