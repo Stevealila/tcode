@@ -167,6 +167,54 @@ If you're on a higher tier, raise or disable these (`TCODE_MAX_RPM=0`,
 larger `TCODE_CLEAR_AFTER_TOKENS`). The defaults are tuned for the free
 tier, not a hard ceiling.
 
+## Large files and batch tasks
+
+`read_file` truncates a large file from the *middle* past a few thousand
+characters — real content just isn't there for the model to see, with
+nothing telling it that. For a file where you need a specific answer
+rather than its literal bytes (a long log, a research note, a data dump),
+use `read_and_distill(path, prompt)` instead: it reads the file in full,
+then a second, cheap model extracts just what's relevant to `prompt`. Keep
+using `read_file` for anything you need to see or edit verbatim.
+
+For a task that means processing *many* such files — read everything in a
+directory and reduce it to one summary, say — don't ask a single tcode
+turn to do it, even with `read_and_distill` available. Tested this
+exhaustively: a turn given a list of items and told "process all of them"
+reliably stops early, past a surprisingly small N, and confabulates a
+plausible-sounding reason (almost always some form of "out of token
+budget," which checking the actual usage never bears out). This isn't a
+context-window problem — it reproduces even when each individual item is
+small. It's the model deciding a multi-item task looks too big and bailing
+before actually running out of anything.
+
+The fix is external, not a flag: drive it with a script that calls `tcode`
+once per item — a plain shell loop, one headless call per file — rather
+than one call handling a list. A three-stage version scales to any input
+size:
+
+```bash
+# 1. map — one tcode call per source file, never a batch
+for f in data/*.md; do
+  tcode "Use read_and_distill on $f to extract <what you need>. \
+    Write ONLY that to summaries/$(basename "$f") via write_file."
+done
+
+# 2. combine — plain shell, no model call, can't fail
+cat summaries/*.md > combined.md
+
+# 3. reduce — one tcode call, one file in
+tcode "Read combined.md and write the final summary to output.md."
+```
+
+If a single combine step is still too large for one reduce call, repeat
+the map step one level up (per-group digests, then combine those) rather
+than asking one turn to read everything at once — validated up to 39 files
+across 5 groups this way. Each map-step call is independent, so a script
+driving this should check the expected output file exists after each call
+and retry once if not, rather than assume success; individual calls are
+reliable but not perfect.
+
 ## Extending
 
 Everything is one file each in `src/`:
