@@ -21,6 +21,11 @@ in denylist mode, blocking a short list of destructive commands (rm, dd,
 mkfs, shutdown, ...) and allowing everything else, including things like
 `gh`, `npm`, or `docker` that a small fixed allowlist would otherwise
 block. Set TCODE_ALLOWED_COMMANDS to opt into a strict allowlist instead.
+TCODE_SHELL=0 goes further and omits the Shell capability entirely — no
+run_command tool exists at all, not even a restricted one — for a task
+that processes untrusted content and has no legitimate reason to run
+commands, matching a scoped tool list with no Bash in it rather than
+trusting an allowlist to hold under prompt injection.
 """
 
 from __future__ import annotations
@@ -69,19 +74,50 @@ answer unchanged.
 """
 
 
-def _coder_instructions(scratch_dir: Path, web_search: bool, request_limit: int) -> str:
+def _coder_instructions(scratch_dir: Path, web_search: bool, request_limit: int, shell: bool) -> str:
     web_block = _WEB_INSTRUCTIONS if web_search else ""
+    shell_line = (
+        "You have full workspace-rooted file access and a real shell: use "
+        "whatever CLI tools are appropriate (git, gh, package managers, "
+        "language toolchains, etc.), don't assume you're restricted to a "
+        "small fixed set."
+        if shell
+        else "You have workspace-rooted file access — read_file/write_file/"
+        "edit_file/list_directory/find_files/search_files/read_and_distill "
+        "— but no shell in this session: there's no run_command tool, so "
+        "don't reach for CLI equivalents (git, gh, etc.) of things your "
+        "own file tools already cover."
+    )
+    gh_block = (
+        f"""
+
+When the user asks about something that isn't the current workspace (e.g.
+"the X repo", a package to inspect, a URL to fetch), resolve it the direct
+way first — e.g. `gh repo view <name>` / `gh repo clone <name>` — rather
+than exploring the current workspace root or asking the user to
+disambiguate up front; a bare name is normally enough for a tool like `gh`
+to resolve against the user's own account, and the lookup itself will tell
+you if it's actually ambiguous. Only ask the user for a fuller identifier if
+that direct attempt fails or turns up more than one real match. Once you
+have the thing, clone or download it into {scratch_dir} — a subdirectory of
+this workspace set aside for working copies and temp files, so you don't
+scatter loose clones elsewhere in the user's directories — rather than
+directly into cwd or the user's home directory. It's a normal path under
+this workspace, so your own list_directory/read_file/find_files tools work
+on it exactly like anywhere else in the project (relative paths like
+`tcode-scratch/<name>/...` resolve fine); you don't need to clean it up
+afterward."""
+        if shell
+        else ""
+    )
     return f"""\
 You are tcode, a system-wide coding agent running directly in the user's
-terminal, in the current project's working directory. You have full
-workspace-rooted file access and a real shell: use whatever CLI tools are
-appropriate (git, gh, package managers, language toolchains, etc.), don't
-assume you're restricted to a small fixed set. Be direct and efficient:
-prefer taking action (reading files, running commands, making
-edits) over asking the user to do it themselves. Keep prose brief; let file
-diffs and command output speak for themselves. When a task is ambiguous in a
-way that materially changes what you'd build, ask one focused question
-before proceeding, otherwise just proceed.
+terminal, in the current project's working directory. {shell_line} Be
+direct and efficient: prefer taking action (reading files, running
+commands, making edits) over asking the user to do it themselves. Keep
+prose brief; let file diffs and command output speak for themselves. When a
+task is ambiguous in a way that materially changes what you'd build, ask
+one focused question before proceeding, otherwise just proceed.
 
 Be economical with tool output: prefer your own file-system tools
 (list_directory, read_file, find_files) over shell commands like `ls -R`,
@@ -110,23 +146,7 @@ bytes, use read_and_distill(path, prompt) instead: state exactly what
 you're looking for and it returns just that, read in full first. Keep using
 read_file for anything you need to see or edit verbatim (source code,
 configs) — a distilled paraphrase can't stand in for the actual text there.
-
-When the user asks about something that isn't the current workspace (e.g.
-"the X repo", a package to inspect, a URL to fetch), resolve it the direct
-way first — e.g. `gh repo view <name>` / `gh repo clone <name>` — rather
-than exploring the current workspace root or asking the user to
-disambiguate up front; a bare name is normally enough for a tool like `gh`
-to resolve against the user's own account, and the lookup itself will tell
-you if it's actually ambiguous. Only ask the user for a fuller identifier if
-that direct attempt fails or turns up more than one real match. Once you
-have the thing, clone or download it into {scratch_dir} — a subdirectory of
-this workspace set aside for working copies and temp files, so you don't
-scatter loose clones elsewhere in the user's directories — rather than
-directly into cwd or the user's home directory. It's a normal path under
-this workspace, so your own list_directory/read_file/find_files tools work
-on it exactly like anywhere else in the project (relative paths like
-`tcode-scratch/<name>/...` resolve fine); you don't need to clean it up
-afterward.
+{gh_block}
 
 When asked to review, assess, or give an opinion on a codebase, that means
 reading the actual contents of its most relevant source files, not just
@@ -158,7 +178,7 @@ def build_agent(cfg: Config) -> Agent:
     capabilities = [
         Capability(
             instructions=[
-                _coder_instructions(cfg.scratch_dir, cfg.web_search, cfg.request_limit),
+                _coder_instructions(cfg.scratch_dir, cfg.web_search, cfg.request_limit, cfg.shell),
                 # A weak model's sense of "now" defaults to its training
                 # cutoff, not the wall clock — evaluated per run (not baked
                 # in once here) so a long-lived session stays correct across
@@ -167,11 +187,6 @@ def build_agent(cfg: Config) -> Agent:
             ]
         ),
         FileSystem(workspace),
-        Shell(
-            cwd=workspace,
-            allowed_commands=cfg.allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-        ),
         RepoContext(workspace_dir=cfg.cwd),
         Planning(),
         # Always on, unlike web_capabilities: this is a FileSystem gap
@@ -179,6 +194,14 @@ def build_agent(cfg: Config) -> Agent:
         # capability or API key. See files.py's module docstring.
         *file_capabilities(cfg, provider),
     ]
+    if cfg.shell:
+        capabilities.append(
+            Shell(
+                cwd=workspace,
+                allowed_commands=cfg.allowed_commands,
+                denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
+            )
+        )
     if cfg.web_search:
         capabilities += web_capabilities(cfg, provider)
     capabilities += [

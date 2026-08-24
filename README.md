@@ -106,6 +106,13 @@ Either way, this is a guardrail against accidents, not a sandbox boundary:
 allowed commands can still spawn arbitrary subprocesses. Don't point this at
 a directory you don't trust an agent to have shell access to.
 
+For a task that processes untrusted content and has no legitimate reason to
+run commands at all (summarizing scraped web pages, say), an allowlist
+still leaves a shell for a prompt-injected page to try to abuse. Set
+`TCODE_SHELL=0` to omit the Shell capability entirely — no `run_command`
+tool exists for the model to be tricked into calling, not even a
+restricted one.
+
 ## Web search
 
 On by default, no API key needed: a search tool (DuckDuckGo) and a fetch

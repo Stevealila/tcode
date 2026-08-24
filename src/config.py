@@ -21,6 +21,7 @@ DEFAULT_KEEP_TOOL_PAIRS = 3
 DEFAULT_CLEAR_AFTER_TOKENS = 3000
 DEFAULT_MAX_RPM = 30
 DEFAULT_WEB_SEARCH = True
+DEFAULT_SHELL = True
 
 GLOBAL_DIR = Path.home() / ".tcode"
 
@@ -57,6 +58,7 @@ class Config:
     model: str
     request_limit: int
     allowed_commands: list[str]
+    shell: bool
     tool_output_max_chars: int
     keep_tool_pairs: int
     clear_after_tokens: int
@@ -106,6 +108,16 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     # allowlist mode instead, e.g. "git,python,pytest,ruff".
     raw_allowed = os.environ.get("TCODE_ALLOWED_COMMANDS", "").strip()
     allowed_commands = [c.strip() for c in raw_allowed.split(",") if c.strip()]
+
+    # Denylist/allowlist mode above still leaves *some* shell — for a task
+    # that processes untrusted content (a web page, an arbitrary file) and
+    # has no legitimate reason to run commands at all, that's still a
+    # prompt-injection target. TCODE_SHELL=0 removes the Shell capability
+    # entirely: no run_command/start_command tool exists for the model to
+    # be tricked into calling, matching a scoped `--allowedTools` list with
+    # no Bash in it.
+    raw_shell = os.environ.get("TCODE_SHELL", "").strip().lower()
+    shell = raw_shell not in ("0", "false", "no") if raw_shell else DEFAULT_SHELL
 
     # Groq's lower tiers cap throughput at a few thousand tokens per minute,
     # so a single unbounded tool result (e.g. `ls -R` on a real repo) can
@@ -165,6 +177,7 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         model=model,
         request_limit=request_limit,
         allowed_commands=allowed_commands,
+        shell=shell,
         tool_output_max_chars=tool_output_max_chars,
         keep_tool_pairs=keep_tool_pairs,
         clear_after_tokens=clear_after_tokens,
