@@ -15,9 +15,7 @@ instead.
 - A [Groq API key](https://console.groq.com/keys) (free tier available)
 
 ```bash
-git clone https://github.com/Stevealila/tcode.git
-cd tcode
-uv tool install --editable .
+git clone https://github.com/Stevealila/tcode.git && cd tcode && uv tool install --editable .
 ```
 
 This puts a `tcode` command on your `PATH`, usable from **any** directory.
