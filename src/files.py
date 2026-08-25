@@ -1,39 +1,22 @@
 """A distilling file-read tool, for files FileSystem's `read_file` mangles.
 
-Found by testing tcode against a real research-synthesis task (reducing many
-dense daily notes into one summary — see improvements notes for the TODO
-this came out of): asked it to read one real file in full and report back
-specifics from throughout it. Its own answer showed the problem —
-
-    "The tool reports that the file is 37,094 characters long, but it
-    omitted the middle 35,094 characters, showing only the first ~800 and
-    last ~1,200 characters."
-
 `agent.py`'s `ToolOutputLimits` truncates every tool result, `read_file`
-included, to a few thousand characters — the right default for ordinary
-coding output (a grep hit, a source file), silently catastrophic for a
-document running tens of thousands of characters, since whatever's in the
-middle just isn't there for the model to reason about, with no signal that
-anything is missing.
-
-Two options: raise the truncation limit globally, or reach for a bigger
-model with a bigger context window. Both trade away something this harness
-already relies on elsewhere — a low global truncation limit is what keeps
-ordinary coding turns cheap on Groq's TPM budget, and swapping models
-per-task isn't something a single `Agent` does mid-run. `read_and_distill`
-sidesteps both: read the file in full (bypassing the truncation entirely,
-via the same sandboxed `FileSystemToolset` the main FileSystem capability
-uses — not a raw open()), then hand that content to a second, cheap model
-(`distill.py`, shared with `web.py`'s `web_fetch`) along with the specific
-question the caller asked, so only a targeted answer re-enters the primary
-model's context. A large document processed this way costs a few hundred
-tokens of context instead of its full length — which also means a task that
-reduces many such documents into one summary no longer has to fit all of
-them, in full, in a single context window at once; each one is compressed
-before it ever gets there. Offered alongside `read_file`, not instead of
-it: editing a file needs its literal bytes, which a distilled paraphrase
-can't give you — this tool is for when a targeted answer is what's actually
-wanted, not a document too big to read at all.
+included, to a few thousand characters — fine for ordinary coding output (a
+grep hit, a source file), but it silently drops the middle of anything
+longer, with no signal to the model that content is missing. Raising the
+global limit or reaching for a bigger-context model both trade away
+something this harness relies on elsewhere (Groq's TPM budget stays cheap
+because the limit is low; a single `Agent` doesn't swap models mid-run), so
+`read_and_distill` sidesteps both: read the file in full via the same
+sandboxed `FileSystemToolset` the main FileSystem capability uses, then hand
+it to a second, cheap model (`distill.py`, shared with `web.py`'s
+`web_fetch`) along with the caller's specific question, so only a targeted
+answer re-enters the primary model's context — a large document costs a few
+hundred tokens of context instead of its full length this way, which is
+also what lets a task reducing many such documents into one summary avoid
+needing all of them in a single context window at once. Offered alongside
+`read_file`, not instead of it: editing needs literal bytes, which a
+distilled paraphrase can't give.
 """
 
 from __future__ import annotations

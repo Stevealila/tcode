@@ -1,25 +1,18 @@
 """Shared "read big content, answer one question about it" helper.
 
-`web.py`'s `web_fetch` and `files.py`'s `read_and_distill` both hit the same
-shape of problem from different directions — a fetched page or a large file
-is too big and too noisy to hand the primary model raw, so a caller-scoped
-question goes to a second, cheap model first, and only its distilled answer
-reaches the orchestrator. The distillation agent itself doesn't care whether
-the content came from a URL or a path, so it's built once here.
+`web.py`'s `web_fetch` and `files.py`'s `read_and_distill` both hand a large,
+noisy blob (a fetched page, a big file) to a second, cheap model along with
+the caller's specific question, so only the distilled answer reaches the
+primary model's context. The distillation agent doesn't care whether the
+content came from a URL or a path, so it's built once here.
 
-`openai/gpt-oss-20b` is a reasoning model: by default it spends output-token
-budget on hidden chain-of-thought before ever emitting the visible answer,
-and a real run hit `groq_reasoning_effort`'s default burning the *entire*
-per-request token limit on reasoning for one file, with the error surfacing
-as "Model token limit exceeded before any response was generated" — a crash,
-not a graceful failure, and one with no obvious link to the file that caused
-it (a 6.5KB file well within range, no larger than several that had already
-succeeded). Extraction against one already-fetched document doesn't need
-multi-step reasoning, so this turns reasoning down as far as the API
-allows: cheaper and faster on every call, and removes most of an entire
-failure mode this task never needed to risk. (`'none'` is rejected outright
-by this model — `groq_reasoning_effort` must be `low`/`medium`/`high` here,
-despite the wider type hint; checked against the live API, not assumed.)
+`openai/gpt-oss-20b` is a reasoning model, so `groq_reasoning_effort` is
+forced to `low`: left at its default, it can spend its entire per-request
+token budget on hidden chain-of-thought before emitting any visible answer,
+which single-document extraction doesn't need — cheaper and faster on every
+call, and removes a failure mode this task never needed to risk. (`'none'`
+is rejected outright by this model despite the wider type hint; checked
+against the live API.)
 """
 
 from __future__ import annotations

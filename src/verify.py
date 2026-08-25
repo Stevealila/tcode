@@ -1,49 +1,33 @@
 """Independent-verifier decision mode (`tcode --verify`).
 
-Built for a specific, well-evidenced gap: a single model's tool-call/read
-discipline can be made reliable (see files.py/web.py's module docstrings),
-but a *confidently wrong, cleanly-formed* answer is a different problem —
-nothing about calling the right tools correctly stops a model from
-misreading its own inputs. That matters most exactly where a caller acts
-on the answer without a human reading it critically first (a script parsing
-`--quiet` output for a decision, say) — the "look correct" property write
-tools give you says nothing about factual correctness.
+A single model's tool-call/read discipline can be made reliable (see
+files.py/web.py), but a confidently wrong, cleanly-formed answer is a
+different problem nothing about correct tool use prevents — the failure
+mode that matters most for a caller acting on the answer without a human
+reading it first (a script parsing `--quiet` output for a decision, say).
+Self-consistency (majority-voting the same model) raises accuracy on random
+errors but not systematic ones, since a model's own blind spot tends to
+reproduce across samples, and self-reported confidence scores are poorly
+calibrated — so instead of either, `--verify` re-derives the answer
+independently and checks agreement, closer to how multi-agent verification
+outperforms same-model voting in practice.
 
-Researched before building rather than guessed at: self-consistency
-(majority-voting several samples from the *same* model) is documented to
-raise accuracy on random errors but *not* on systematic ones — if a model
-has a consistent blind spot, it tends to reproduce that same blind spot
-across samples, and voting just returns it with false confidence. Eliciting
-a confidence/conviction score from the model itself doesn't reliably fix
-this either — self-reported LLM confidence is well-documented as poorly
-calibrated. What the same research does support: an *independent* verifier
-— ideally a different model, so it isn't sharing the same blind spot —
-re-deriving an answer from the same inputs and checked for agreement,
-which is closer to how multi-agent verification setups outperform
-single-pass and same-model self-consistency in practice.
-
-So `--verify` runs three passes, never two:
+Three passes, never two:
   1. primary   — the configured model, full capabilities, the real answer.
-  2. verifier  — a genuinely independent re-derivation from the same
-     prompt: a different model by default (never the primary's own
-     answer as context — that would just invite anchoring, not
-     independent judgment), or an arbitrary external command
-     (TCODE_VERIFY_CMD) for cross-provider verification when one is
-     configured. Neither is a hard dependency on the other: the default
-     path needs nothing beyond the same Groq account already in use,
-     keeping "runs without a subscription" intact for the verifier too;
-     TCODE_VERIFY_CMD is there for a caller wanting a stronger (paid,
-     different-architecture) verifier when one happens to be reachable,
-     the same shape as TAVILY_API_KEY opting web.py into a better search
-     backend when available and falling back cleanly when it isn't.
-  3. compare   — a third, cheap pass judging whether primary and verifier
-     actually agree on the substance, not the wording.
+  2. verifier  — an independent re-derivation from the same prompt: a
+     different model by default (never given the primary's own answer,
+     which would just invite anchoring), or `TCODE_VERIFY_CMD` for an
+     external/cross-provider command when one's configured. Neither is a
+     hard dependency on the other — the default path needs nothing beyond
+     the same Groq account already in use; TCODE_VERIFY_CMD is there for a
+     caller wanting a stronger verifier when one's reachable, same
+     opt-in-when-available shape as TAVILY_API_KEY in web.py.
+  3. compare   — a third, cheap pass judging substantive agreement, not
+     wording.
 
 On agreement, the primary's answer is what the caller gets. On
-disagreement, `run_verified` deliberately returns nothing usable rather
-than a hedge or a pick-one — see cli.py's `verify_mode` for why that
-specific shape (empty stdout, non-zero exit) was chosen over inventing a
-new output contract.
+disagreement, `run_verified` returns nothing usable rather than a hedge or
+a pick-one — see cli.py's `verify_mode` for the output contract.
 """
 
 from __future__ import annotations

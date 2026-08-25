@@ -1,32 +1,18 @@
 """Internal map-reduce over many files (`tcode --reduce`).
 
-The problem this exists to fix isn't technical, it's architectural. TODO 3
-(see improvements notes) validated that reading a whole window of files and
-reducing them to one output has to be chunked — one internal call per item,
-never a single turn handling a list, because that turn reliably invents a
-fake "out of budget" excuse and stops early regardless of how small the
-items are. The first working version of that fix lived in the *caller* — a
-bash script issuing one `tcode` subprocess per file, gluing the results
-back together itself. That solved the immediate problem but got the
-layering backwards: the caller had to know tcode's internal reliability
-limits and work around them, which means every future caller hitting the
-same wall has to rediscover and reimplement the same workaround. Compare
-`--verify` (verify.py): a caller invoking it doesn't know or care that it's
-three model calls internally — it looks like one command that returns one
-trustworthy answer. That's the shape a fix here should have had from the
-start: the chunking is tcode's problem to solve once, not each caller's
-problem to solve again.
-
-So `--reduce PATTERN` takes the validated pipeline and moves all of it
-in-process:
+A single turn asked to process a whole list of files — read N raw files,
+reduce them to one output — reliably invents a fake "out of budget" excuse
+and stops early, regardless of how small the list or the items are. So
+`--reduce PATTERN` chunks the work internally rather than asking the caller
+to chunk it externally, the same shape `--verify` (verify.py) already uses
+to hide its three internal model calls behind one answer:
 
   1. map    — one internal distillation per matched file (reusing
      `distill.py`, the same mechanism `read_and_distill` already uses),
      run concurrently — `throttle()` still paces the underlying requests,
      so concurrency here is "issue them all and let the shared limiter
      serialize what needs serializing," not a way around the rate limit.
-  2. group  — only when there are more files than one map/reduce turn has
-     been tested reliable for (see `GROUP_THRESHOLD`): grouped by parent
+  2. group  — only past `GROUP_THRESHOLD` files: grouped by parent
      directory, a generic structural signal (files a filesystem already
      put together are presumably related) rather than anything specific
      to one caller's domain, then each group gets its own concurrent
@@ -35,11 +21,10 @@ in-process:
      `--quiet`, can write_file if the prompt asks it to) over the
      collected map/digest output plus the caller's original prompt.
 
-A caller with a batch task now looks exactly like a caller with a single-
-file task: one `tcode --reduce PATTERN "..."` invocation, one answer out.
-Nothing about matched-file count, grouping, or retries is the caller's
-concern — same principle `--verify` already established, applied to the
-other place this session found the same layering mistake.
+A caller with a batch task looks exactly like a caller with a single-file
+task: one `tcode --reduce PATTERN "..."` invocation, one answer out.
+Matched-file count, grouping, and retries are tcode's problem, not the
+caller's.
 """
 
 from __future__ import annotations
