@@ -1,57 +1,30 @@
 """Web search and fetch tools.
 
-Two failure modes drove this design, both found by testing against real
-queries, not guessed at:
+DuckDuckGo's snippets and a raw markdownify fetch both push a model toward
+guessing: stale SEO copy reads as a current number, and a client-rendered
+page's JS/CSS boilerplate reads as "no real content," which a model tends to
+paper over by inventing a plausible-sounding answer. `_make_web_fetch_tool`
+fixes the fetch side with a two-stage pipeline: fetch and convert to
+markdown, then hand that content plus the caller's *specific question* to a
+second, cheap Groq model (`distill.py`) that says plainly when the page
+doesn't have the answer — so a blank or noisy page produces "not found"
+instead of material to guess from. (Same fetch-then-distill split Claude
+Code's own `WebFetch` uses.) Content under `_DISTILL_SKIP_CHARS` skips the
+extra round-trip.
 
-1. DuckDuckGo's local search tool (the zero-setup default) returns index
-   snippets for "live price"-style pages that are almost always stale: static
-   SEO copy with a historical example number and an old date baked into the
-   page text, not the number the page actually displays right now (that's
-   client-rendered). A model answering straight from the snippet states last
-   year's number as current.
-
-2. The markdownify-based local fetch tool has the matching failure on the
-   other side: a page whose real content is client-rendered JS returns mostly
-   JS/CSS boilerplate as "content". Faced with that noise (or a fetch that
-   flat-out failed), the model's path of least resistance was inventing a
-   specific-sounding number and attributing it to the page it just failed to
-   read — worse than saying nothing.
-
-Neither is a fetching problem, so a fancier fetch (a headless browser, say)
-doesn't fix it — the fix is putting a checkpoint between "content we
-retrieved" and "claim the model makes." `_make_web_fetch_tool` builds a
-two-stage pipeline: fetch and convert to markdown, then hand that content to
-a second, cheap Groq model (`openai/gpt-oss-20b`) along with the *specific
-question* the caller asked, so only a targeted, distilled answer reaches the
-orchestrator — never the raw page. That model is instructed to say plainly
-when the page doesn't contain the answer, which is what actually stops the
-hallucination: a blank or noisy page produces "not found" instead of
-material for the (weaker, more confident) primary model to run with. Content
-under `_DISTILL_SKIP_CHARS` skips the extra round-trip; there's nothing to
-filter. (Checked afterward against Claude Code's own `WebFetch` tool
-description: it does the same fetch-then-distill split, for the same reason
-— corroboration that the design holds, not the source of it.)
-
-Search gets the equivalent fix from the other direction: DuckDuckGo's
-snippets are the input that made problem 1 possible in the first place, so
-the zero-setup default stays available (no query should hard-fail because a
-key is missing) but isn't the only option. `TAVILY_API_KEY` opts into
-Tavily — a search API returning cleaner, already-extracted content instead
-of raw SERP snippets, with a `finance` topic mode that's a direct match for
-"what's the current price of X" — auto-detected by the key's presence,
-DuckDuckGo used otherwise. (Same provider-precedence shape other agent
-harnesses converge on independently, e.g. OpenClaw's search-provider chain —
-which is a sign this is the generic right answer, not a borrowed one.)
-Nothing about any of this is trading-specific; "what's the current
-price/version/score of X" is a generic agent capability gap, and the fix is
-the same for all of it.
+Search gets the same fix from the other side: DuckDuckGo stays the
+zero-setup default, but `TAVILY_API_KEY` opts into Tavily — cleaner,
+already-extracted content instead of raw snippets, with a `finance` topic
+mode — auto-detected by the key's presence. Same provider-precedence shape
+as OpenClaw's search-provider chain.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic_ai import Tool
+from pydantic_ai import ModelRetry, Tool
 from pydantic_ai.capabilities import Capability, WebFetch, WebSearch
 from pydantic_ai.common_tools.web_fetch import web_fetch_tool
 from pydantic_ai.messages import BinaryContent
@@ -78,15 +51,73 @@ def current_time_instructions() -> str:
     )
 
 
+def _make_tavily_search_tool(cfg: Config) -> Tool:
+    from tavily.errors import BadRequestError
+
+    from pydantic_ai.common_tools.tavily import tavily_search_tool
+
+    # topic/time_range/etc. are left unset (not _UNSET) so the model can set
+    # them per call — 'finance'/'news' topics and a time_range are exactly
+    # what a "what's the current price of X" query wants, and Tavily's own
+    # defaults are sane when it doesn't.
+    base_search = tavily_search_tool(api_key=cfg.tavily_api_key, max_results=5)
+
+    # tavily-python raises its own exceptions straight out of client.search()
+    # (confirmed live: 'fast'/'ultra-fast' search_depth combined with the
+    # 'finance' topic above — a combination the model reaches for on its
+    # own — gets rejected as a BadRequestError, HTTP 400) with no try/except
+    # anywhere in pydantic_ai's TavilySearchTool.__call__, and pydantic_ai's
+    # own on_tool_execute_error default is `raise error`, not recover.
+    # Uncaught, that propagates straight out of run_turn and kills the whole
+    # process instead of giving the model a correctable retry — the same
+    # shape FileSystemToolset's own wrapper already handles for its
+    # exceptions (PermissionError, FileNotFoundError, ..., converted to
+    # ModelRetry). Deliberately NOT catching ForbiddenError/InvalidAPIKeyError
+    # here too, despite being from the same errors.py: those map to HTTP
+    # 401/403/432/433 (checked against Tavily's own API reference, not
+    # assumed) — an invalid key or a plan/usage-limit ceiling, none of which
+    # a retry with different search_depth/topic/etc. can ever fix. Catching
+    # those would burn the tool's whole retry budget on an error no retry
+    # solves, then fail anyway via UnexpectedModelBehavior, just slower and
+    # under a "please retry" framing that hides what's actually a config or
+    # billing problem — worse than letting it propagate immediately to
+    # one_shot()'s catch-all, which at least surfaces it as what it is.
+    async def tavily_search(
+        query: str,
+        search_depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "basic",
+        topic: Literal["general", "news", "finance"] = "general",
+        time_range: Literal["day", "week", "month", "year"] | None = None,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+    ) -> list:
+        """Searches Tavily for the given query and returns the results.
+
+        Args:
+            query: The search query to execute with Tavily.
+            search_depth: The depth of the search.
+            topic: The category of the search.
+            time_range: The time range back from the current date to filter results.
+            include_domains: List of domains to specifically include in the search results.
+            exclude_domains: List of domains to specifically exclude from the search results.
+        """
+        try:
+            return await base_search.function(
+                query,
+                search_depth=search_depth,
+                topic=topic,
+                time_range=time_range,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        except BadRequestError as e:
+            raise ModelRetry(str(e)) from e
+
+    return Tool(tavily_search, name="tavily_search", description=base_search.description)
+
+
 def _search_capability(cfg: Config) -> WebSearch:
     if cfg.tavily_api_key:
-        from pydantic_ai.common_tools.tavily import tavily_search_tool
-
-        # topic/time_range/etc. are left unset (not _UNSET) so the model can
-        # set them per call — 'finance'/'news' topics and a time_range are
-        # exactly what a "what's the current price of X" query wants, and
-        # Tavily's own defaults are sane when it doesn't.
-        return WebSearch(native=False, local=tavily_search_tool(api_key=cfg.tavily_api_key, max_results=5))
+        return WebSearch(native=False, local=_make_tavily_search_tool(cfg))
     return WebSearch(native=False, local="duckduckgo")
 
 
