@@ -32,10 +32,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from pydantic_ai import UsageLimits
+from pydantic_ai import UnexpectedModelBehavior, UsageLimits
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai_harness import FileSystem
 
+from . import ui
 from .agent import build_agent
 from .config import Config
 from .distill import make_distill_agent
@@ -47,6 +48,11 @@ from .runner import run_turn
 GROUP_THRESHOLD = 12
 
 _MAX_READ_LINES = 20_000
+
+# What a degraded map/digest item reads as downstream (the final reduce
+# prompt, or a later digest pass) when its own distillation call fails —
+# see _map_one/_digest_group below.
+_NO_SIGNAL = "no signal extracted (distillation call failed)"
 
 
 def discover_files(pattern: str, root: Path) -> list[Path]:
@@ -86,22 +92,50 @@ def _group_key(path: Path) -> str:
     return str(path.parent)
 
 
-async def _map_one(reader, distill_agent, cfg: Config, path: Path, extraction_prompt: str) -> tuple[str, str]:
+async def _map_one(
+    reader, distill_agent, cfg: Config, path: Path, extraction_prompt: str, *, quiet: bool
+) -> tuple[str, str]:
     raw = await reader.read_file(str(path), limit=_MAX_READ_LINES)
     await throttle(cfg.rpm_state_file, cfg.max_rpm)
-    distilled = await distill_agent.run(
-        f"QUESTION: {extraction_prompt}\n\nFILE: {path}\n\n--- FILE CONTENT ---\n{raw}"
-    )
-    return str(path), str(distilled.output)
+    try:
+        distilled = await distill_agent.run(
+            f"QUESTION: {extraction_prompt}\n\nFILE: {path}\n\n--- FILE CONTENT ---\n{raw}"
+        )
+        return str(path), str(distilled.output)
+    except UnexpectedModelBehavior as e:
+        # distill_agent sits at pydantic_ai's default retry budget (1) and
+        # has no tools of its own, so a single hallucinated tool call here
+        # is an UnexpectedModelBehavior, not a normal failure. Left
+        # unguarded, this exception would propagate out of the
+        # asyncio.gather() below and take down every other file's
+        # already-completed distillation with it. Degrading just this one
+        # item keeps the rest of the batch alive — the final reduce turn
+        # sees one weaker input instead of the caller getting nothing.
+        ui.print_notice(
+            f"note: distillation failed for {path} ({e}) — degrading this "
+            "file to \"no signal extracted\" instead of losing the whole batch.",
+            quiet=quiet,
+        )
+        return str(path), _NO_SIGNAL
 
 
-async def _digest_group(distill_agent, cfg: Config, label: str, items: list[tuple[str, str]], prompt: str) -> tuple[str, str]:
+async def _digest_group(
+    distill_agent, cfg: Config, label: str, items: list[tuple[str, str]], prompt: str, *, quiet: bool
+) -> tuple[str, str]:
     combined = "\n\n".join(f"## {name}\n{text}" for name, text in items)
     await throttle(cfg.rpm_state_file, cfg.max_rpm)
-    distilled = await distill_agent.run(
-        f"QUESTION: {prompt}\n\nGROUP: {label}\n\n--- COMBINED CONTENT ---\n{combined}"
-    )
-    return label, str(distilled.output)
+    try:
+        distilled = await distill_agent.run(
+            f"QUESTION: {prompt}\n\nGROUP: {label}\n\n--- COMBINED CONTENT ---\n{combined}"
+        )
+        return label, str(distilled.output)
+    except UnexpectedModelBehavior as e:
+        ui.print_notice(
+            f"note: digest failed for group {label} ({e}) — degrading this "
+            "group to \"no signal extracted\" instead of losing the whole batch.",
+            quiet=quiet,
+        )
+        return label, _NO_SIGNAL
 
 
 async def run_reduce(
@@ -118,7 +152,7 @@ async def run_reduce(
     extraction_prompt = f"Extract everything relevant to answering this: {prompt}"
 
     map_results = await asyncio.gather(
-        *(_map_one(reader, distill_agent, cfg, f, extraction_prompt) for f in files)
+        *(_map_one(reader, distill_agent, cfg, f, extraction_prompt, quiet=quiet) for f in files)
     )
 
     if len(map_results) > GROUP_THRESHOLD:
@@ -139,7 +173,10 @@ async def run_reduce(
                     chunks.append((f"{key}[{i}:{i + GROUP_THRESHOLD}]", items[i : i + GROUP_THRESHOLD]))
 
         map_results = await asyncio.gather(
-            *(_digest_group(distill_agent, cfg, label, items, extraction_prompt) for label, items in chunks)
+            *(
+                _digest_group(distill_agent, cfg, label, items, extraction_prompt, quiet=quiet)
+                for label, items in chunks
+            )
         )
 
     combined = "\n\n".join(f"## {label}\n{text}" for label, text in map_results)
