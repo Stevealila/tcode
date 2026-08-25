@@ -67,6 +67,7 @@ class Config:
     max_rpm: int
     web_search: bool
     tavily_api_key: str | None
+    write_scope: list[str]
     rpm_state_file: Path
     project_slug: str
     project_dir: Path
@@ -164,6 +165,18 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     # by presence, same as GROQ_API_KEY; DuckDuckGo is the fallback when unset.
     tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip() or None
 
+    # Restricts write_file/edit_file/create_directory to one or more path
+    # prefixes (comma-separated, relative to cwd) without touching read
+    # access — for a caller whose model decides WHERE to write, not just
+    # whether (story_intake.sh-shaped), where trusting the prompt's "write
+    # only under X" rule alone leaves an opening for a prompt-injected page
+    # to steer a write anywhere else the FileSystem tools reach. Unset (the
+    # default) leaves writes unrestricted, same as today. See
+    # guardrails.py's scope_writes_to for why this has to live at the tool
+    # layer rather than as a caller-side post-hoc git-diff check.
+    raw_write_scope = os.environ.get("TCODE_WRITE_SCOPE", "").strip()
+    write_scope = [s.strip() for s in raw_write_scope.split(",") if s.strip()]
+
     slug = _slugify(cwd)
     project_dir = GLOBAL_DIR / "projects" / slug
     memory_dir = GLOBAL_DIR / "memory"
@@ -196,6 +209,7 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         max_rpm=max_rpm,
         web_search=web_search,
         tavily_api_key=tavily_api_key,
+        write_scope=write_scope,
         rpm_state_file=GLOBAL_DIR / "rpm_state",
         project_slug=slug,
         project_dir=project_dir,

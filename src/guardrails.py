@@ -1,34 +1,35 @@
 """Tool guardrails enforcing prompted behavior, not just asking for it.
 
-CODER_INSTRUCTIONS (agent.py) already asks the model to prefer the scoped
-FileSystem tools over raw shell recon and to target the specific thing the
-user asked about rather than dumping the whole workspace. Observed behavior
-against Groq's smaller models shows that instruction alone doesn't always
-hold: a real session ran `ls -R .` against the user's home directory to
-answer a question about one specific repo, walking past unrelated personal
-files it never needed to see. `scope_shell_exploration` gives that
-instruction technical teeth for the one shape of command that caused it: an
-unscoped recursive `ls` against the workspace root or the user's home
-directory. It intentionally does not touch scoped recursion (`ls -R src/`,
-`ls -R ./some_repo`) or other commands like `find`/`grep -r`, which are far
-more often used narrowly and would produce too many false positives to
-block outright.
+agent.py's own instructions already ask for each of these; a smaller model
+doesn't reliably follow them unprompted, so each guard gives one of them
+technical teeth:
 
-`prefer_web_fetch_tool` is the same shape of backstop for the web tools
-added alongside WebSearch/WebFetch in agent.py. A real session asked for the
-current gold price: `duckduckgo_search` returned a snippet with a stale
-dated figure, the model reached for `curl`/raw shell to get a live number
-instead of trying another search result or `web_fetch`, that curl call hit
-JS-rendered markup it couldn't parse, and the run ended in a hallucinated
-price range presented as current fact. Blocking `curl`/`wget` against
-http(s) URLs forces the retry through `web_fetch` instead, which returns
-clean markdown rather than a page's raw HTML/JS.
+- `scope_shell_exploration` blocks an unscoped recursive `ls` (workspace
+  root or home directory) in favor of the scoped FileSystem tools, leaving
+  scoped recursion (`ls -R src/`) and other commands (`find`, `grep -r`)
+  alone — those are used narrowly often enough that blocking them outright
+  would be mostly false positives.
+- `prefer_web_fetch_tool` blocks `curl`/`wget` against http(s) URLs, forcing
+  a retry through `web_fetch` instead, which returns clean markdown rather
+  than the raw HTML/JS a model tends to hallucinate an answer from.
+- `scope_writes_to` restricts `write_file`/`edit_file`/`create_directory` to
+  one or more path prefixes, for a caller whose model decides WHERE to
+  write, not just whether. This has to live at the tool-call layer rather
+  than as a caller-side post-hoc `git status` diff: a path under a
+  gitignored directory never appears in `git status --porcelain` output at
+  all, matched or collapsed — and widening that diff into a plain
+  filesystem walk isn't safe either, since a file that's gitignored
+  *because* something else keeps rewriting it in place would look
+  "changed by this run" and get wrongly reverted. Checking the tool call's
+  own path argument up front avoids both: same allow-list-not-convention
+  approach `protected_patterns` already uses for `.env`/`*.pem`/secrets.
 """
 
 from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo
@@ -92,3 +93,42 @@ def prefer_web_fetch_tool(call: ToolCallInfo) -> GuardrailResult:
             "result rather than falling back to shell."
         )
     return GuardrailResult.allow()
+
+
+WRITE_TOOLS = ("write_file", "edit_file", "create_directory")
+"""The three write-capable FileSystem tools `scope_writes_to` gates.
+
+Exposed so the `ToolGuardrail(..., tools=...)` restriction in agent.py names
+the same list this guard is meant for, rather than a second hand-copied
+tuple drifting out of sync with it.
+"""
+
+
+def scope_writes_to(workspace: str | Path, scopes: Sequence[str]):
+    """Build a guard restricting write_file/edit_file/create_directory to `scopes`.
+
+    `scopes` are paths relative to `workspace` (e.g. "src/research/view/
+    profiles"); a write is allowed only if its resolved target is that path
+    itself or falls under it. Reads are untouched — this only gates the
+    three write-capable FileSystem tools, same restriction-of-writes-not-
+    reads shape as `protected_patterns`, just an allow-list instead of a
+    deny-list. Resolves before comparing (the docstring's own
+    `no_writes_outside_workspace` example does the same) so a prefix string
+    match can't be fooled by `../`.
+    """
+    root = Path(workspace).resolve()
+    allowed = [(root / s).resolve() for s in scopes]
+
+    def guard(call: ToolCallInfo) -> GuardrailResult:
+        raw_path = str(call.args.get("path", ""))
+        target = (root / raw_path).resolve()
+        if any(target == a or target.is_relative_to(a) for a in allowed):
+            return GuardrailResult.allow()
+        return GuardrailResult.retry(
+            f"Writing to {raw_path!r} is out of scope this session — only "
+            f"{' or '.join(s.rstrip('/') + '/' for s in scopes)} may be "
+            "created or modified. If the task doesn't fit there, say so "
+            "instead of writing elsewhere."
+        )
+
+    return guard

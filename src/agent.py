@@ -53,7 +53,7 @@ from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Trunc
 
 from .config import Config
 from .files import file_capabilities
-from .guardrails import scope_shell_exploration
+from .guardrails import WRITE_TOOLS, scope_shell_exploration, scope_writes_to
 from .web import current_time_instructions, web_capabilities
 
 
@@ -75,7 +75,12 @@ answer unchanged.
 
 
 def _coder_instructions(
-    scratch_dir: Path, web_search: bool, request_limit: int, shell: bool, readonly: bool
+    scratch_dir: Path,
+    web_search: bool,
+    request_limit: int,
+    shell: bool,
+    readonly: bool,
+    write_scope: list[str],
 ) -> str:
     web_block = _WEB_INSTRUCTIONS if web_search else ""
 
@@ -85,6 +90,15 @@ def _coder_instructions(
             "find_files/search_files/read_and_distill — but no write_file, "
             "edit_file, or create_directory this session: those tools don't "
             "exist. You can look and reason, never change anything on disk."
+        )
+    elif write_scope:
+        scope_list = " or ".join(s.rstrip("/") + "/" for s in write_scope)
+        files_line = (
+            "You have full workspace-rooted read access — read_file/list_directory/"
+            f"find_files/search_files/read_and_distill — but write_file/edit_file/"
+            f"create_directory only work under {scope_list}; a call outside that is "
+            "rejected and asks you to retry. Read anywhere you need to for context, "
+            "just keep every write inside that path."
         )
     else:
         files_line = (
@@ -192,7 +206,12 @@ def build_agent(cfg: Config) -> Agent:
         Capability(
             instructions=[
                 _coder_instructions(
-                    cfg.scratch_dir, cfg.web_search, cfg.request_limit, cfg.shell, cfg.readonly
+                    cfg.scratch_dir,
+                    cfg.web_search,
+                    cfg.request_limit,
+                    cfg.shell,
+                    cfg.readonly,
+                    cfg.write_scope,
                 ),
                 # A weak model's sense of "now" defaults to its training
                 # cutoff, not the wall clock — evaluated per run (not baked
@@ -225,6 +244,21 @@ def build_agent(cfg: Config) -> Agent:
         # observed behavior shows the model doesn't always follow it. See
         # guardrails.py's module docstring for the incident that prompted this.
         ToolGuardrail(guard=scope_shell_exploration),
+        *(
+            [
+                # A caller-side post-hoc check (diff git status before/after,
+                # revert anything outside an allowed path) can't see a write
+                # into a gitignored directory at all — this fires on the
+                # tool call itself, before the write happens, so it isn't.
+                # See guardrails.py's module docstring.
+                ToolGuardrail(
+                    guard=scope_writes_to(workspace, cfg.write_scope),
+                    tools=WRITE_TOOLS,
+                )
+            ]
+            if cfg.write_scope
+            else []
+        ),
         # Tuned for Groq's tokens-per-minute budget rather than a generic
         # large context window; see module docstring.
         ClearToolResults(max_tokens=cfg.clear_after_tokens, keep_pairs=cfg.keep_tool_pairs),

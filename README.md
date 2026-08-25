@@ -89,6 +89,19 @@ see "Shell access" below), leaving `read_file`/`list_directory`/
 and `TCODE_WEB_SEARCH=0` for a fully read-only, no-side-effects session —
 diagnose, decide, report, touch nothing.
 
+For a task that reads broadly but should only ever write in one place —
+the model decides *where* within the workspace, not just *whether*, and
+prompt convention alone ("only write under X") is a request an untrusted
+input (a fetched page, say) could talk it out of — set
+`TCODE_WRITE_SCOPE=path/prefix` (comma-separated for more than one). Every
+`write_file`/`edit_file`/`create_directory` call is checked against it
+before the write happens and rejected (with a message the model can act
+on) if it isn't; reads are unaffected. This is a technical backstop, not a
+convention: it doesn't consult `.gitignore` and isn't fooled by `../`, so
+it holds even for a target a caller-side `git status` diff would never see
+(a gitignored directory) or shouldn't trust diffing at all (a path some
+other process legitimately rewrites concurrently).
+
 The prompt can come via stdin instead of an argument too (`echo "..." |
 tcode`, or a subprocess `input=` from another language) — useful once the
 prompt is long enough that shell quoting gets awkward, or the caller
