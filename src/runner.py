@@ -161,14 +161,34 @@ async def run_turn(
 
                 result = run.result
 
-            if _looks_like_faked_tool_call("".join(final_text_parts)) and attempt < _MAX_EMPTY_TURN_RETRIES:
+            if _looks_like_faked_tool_call("".join(final_text_parts)):
+                if attempt < _MAX_EMPTY_TURN_RETRIES:
+                    ui.print_notice(
+                        "note: the model printed a tool call as text instead of "
+                        f"actually making it — retrying the whole turn "
+                        f"({attempt + 1}/{_MAX_EMPTY_TURN_RETRIES})",
+                        quiet=quiet,
+                    )
+                    continue
+                # Retry budget exhausted and it's still doing this. Falling
+                # through silently here was the bug: the loop below would
+                # treat this known-bad text exactly like a normal answer —
+                # printing it to stdout, letting --write persist it as if it
+                # were the model's real output — with nothing in the logs to
+                # tell a human (or a caller like profile_scout.sh, watching
+                # only the process exit code) that it's a faked tool call,
+                # not prose. Still returned rather than raised: it's
+                # sometimes a truncated-but-genuine write_file payload (see
+                # --write's recovery of this exact shape), so discarding it
+                # outright would lose more than flagging it loudly does.
                 ui.print_notice(
                     "note: the model printed a tool call as text instead of "
-                    f"actually making it — retrying the whole turn "
-                    f"({attempt + 1}/{_MAX_EMPTY_TURN_RETRIES})",
+                    "actually making it, and kept doing so through "
+                    f"{_MAX_EMPTY_TURN_RETRIES} retries — giving up and "
+                    "returning it as-is, but treat this as an unconfirmed, "
+                    "likely-malformed answer, not a normal one.",
                     quiet=quiet,
                 )
-                continue
             break
         except UnexpectedModelBehavior as e:
             # Seen in practice on Groq's gpt-oss models at large output
