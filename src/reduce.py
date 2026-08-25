@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from pydantic_ai import UnexpectedModelBehavior, UsageLimits
+from pydantic_ai import AgentRunError, UsageLimits
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai_harness import FileSystem
 
@@ -96,17 +96,25 @@ async def _map_one(
     reader, distill_agent, cfg: Config, path: Path, extraction_prompt: str, *, quiet: bool
 ) -> tuple[str, str]:
     raw = await reader.read_file(str(path), limit=_MAX_READ_LINES)
-    await throttle(cfg.rpm_state_file, cfg.max_rpm)
+    # distill_agent is always Groq (see distill.py's DISTILL_MODEL) regardless
+    # of which provider the primary/final-reduce model is on — pace against
+    # Groq's own budget specifically, not cfg's active-provider one.
+    await throttle(cfg.groq_rpm_state_file, cfg.groq_max_rpm)
     try:
         distilled = await distill_agent.run(
             f"QUESTION: {extraction_prompt}\n\nFILE: {path}\n\n--- FILE CONTENT ---\n{raw}"
         )
         return str(path), str(distilled.output)
-    except UnexpectedModelBehavior as e:
+    except AgentRunError as e:
         # distill_agent sits at pydantic_ai's default retry budget (1) and
-        # has no tools of its own, so a single hallucinated tool call here
-        # is an UnexpectedModelBehavior, not a normal failure. Left
-        # unguarded, this exception would propagate out of the
+        # has no tools of its own, so this is either a hallucinated tool
+        # call (UnexpectedModelBehavior) or the provider's own API rejecting
+        # the generation outright (ModelHTTPError — observed at high
+        # concurrent group counts: Groq's structured-output parser
+        # returning a 400 "output_parse_failed" for this model under load).
+        # AgentRunError is the base both share, and every subclass means
+        # the same thing here: this one call didn't produce a usable
+        # answer. Left unguarded, either would propagate out of the
         # asyncio.gather() below and take down every other file's
         # already-completed distillation with it. Degrading just this one
         # item keeps the rest of the batch alive — the final reduce turn
@@ -123,13 +131,18 @@ async def _digest_group(
     distill_agent, cfg: Config, label: str, items: list[tuple[str, str]], prompt: str, *, quiet: bool
 ) -> tuple[str, str]:
     combined = "\n\n".join(f"## {name}\n{text}" for name, text in items)
-    await throttle(cfg.rpm_state_file, cfg.max_rpm)
+    # distill_agent is always Groq (see distill.py's DISTILL_MODEL) regardless
+    # of which provider the primary/final-reduce model is on — pace against
+    # Groq's own budget specifically, not cfg's active-provider one.
+    await throttle(cfg.groq_rpm_state_file, cfg.groq_max_rpm)
     try:
         distilled = await distill_agent.run(
             f"QUESTION: {prompt}\n\nGROUP: {label}\n\n--- COMBINED CONTENT ---\n{combined}"
         )
         return label, str(distilled.output)
-    except UnexpectedModelBehavior as e:
+    except AgentRunError as e:
+        # Same reasoning as _map_one's — see its comment for why this is
+        # AgentRunError, not just UnexpectedModelBehavior.
         ui.print_notice(
             f"note: digest failed for group {label} ({e}) — degrading this "
             "group to \"no signal extracted\" instead of losing the whole batch.",

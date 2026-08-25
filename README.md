@@ -50,6 +50,28 @@ comparing on your workload). Check `GET /openai/v1/models` against your own
 key before picking one — Groq's catalog changes, and a model that's current
 today may be gone in a few months.
 
+### Other providers
+
+Groq stays the zero-setup default, but `--model` also accepts
+`provider:model_id` to run a turn on a different backend when you have a
+key for one and Groq's own current catalog isn't the right fit for a given
+task — `tcode --model google:gemini-2.5-flash "..."`. Currently wired up:
+
+| provider prefix | env var          | example model         |
+|------------------|-------------------|------------------------|
+| *(none)*          | `GROQ_API_KEY`    | `openai/gpt-oss-120b`  |
+| `google`          | `GOOGLE_API_KEY`  | `gemini-2.5-flash`     |
+
+`GROQ_API_KEY` stays required either way — the large-file distillation
+pass (see "Large files and batch tasks" below) and `--verify`'s
+default verifier/compare passes are Groq-only by design, independent of
+whichever provider the main turn runs on. Each provider paces its own
+requests against its own account-wide rate limit (Groq: 30 RPM default;
+Google AI Studio's free tier: 15 RPM default), tracked separately per
+provider under `~/.tcode/`, and `TCODE_MAX_RPM` still overrides Groq's
+specifically. Adding another provider is a small, self-contained change —
+see `_build_model` in `src/agent.py`.
+
 ## Use
 
 ```bash

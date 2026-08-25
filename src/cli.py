@@ -43,6 +43,29 @@ def _mtime(path: Path) -> float | None:
         return None
 
 
+_LEAKED_TOOL_CALL_PREFIXES = ('{"name"', "{'name'")
+_LEAKED_TOOL_CALL_MARKERS = ("<tool_call>", "<function=")
+
+
+def _looks_like_leaked_tool_call(text: str) -> bool:
+    """True if `text` is a model's own tool-call syntax leaking out as plain
+    assistant text instead of triggering a real structured call.
+
+    Observed on Groq's hosting of more than one model family at large
+    (~40-file/~50K-token) reduce inputs: gpt-oss models sometimes emit the
+    call as a literal `{"name": "write_file", "arguments": {...}` JSON
+    envelope instead of invoking it; qwen3.6-27b sometimes emits its
+    provider's own `<tool_call><function=write_file>...` pseudo-XML the same
+    way. Either way the text that reaches here is the tool call itself, not
+    an answer — real prose essentially never contains these exact markers,
+    so this is a structural signal, not a guess.
+    """
+    stripped = text.strip()
+    if stripped.startswith(_LEAKED_TOOL_CALL_PREFIXES):
+        return True
+    return any(marker in text for marker in _LEAKED_TOOL_CALL_MARKERS)
+
+
 def _apply_write_fallback(
     write_path: Path | None, before_mtime: float | None, final_text: str, *, quiet: bool
 ) -> None:
@@ -61,6 +84,23 @@ def _apply_write_fallback(
         return
     if not final_text.strip():
         return
+    if _looks_like_leaked_tool_call(final_text):
+        # Writing this would be worse than writing nothing: it dresses up
+        # as a successful save (file now exists, mtime changed, a
+        # reassuring notice) while the content is the model's own
+        # unexecuted tool call, not an answer. A caller whose retry logic
+        # is exactly "did the file change" (the callers this fallback
+        # exists for) would take that as success and never retry — see
+        # _looks_like_leaked_tool_call's docstring for where this was
+        # observed. Leaving the file untouched keeps this turn looking like
+        # what it was: nothing usable produced, same as an empty answer.
+        ui.print_notice(
+            f"--write: the model's final answer looks like its own "
+            f"unexecuted tool call, not a real answer — leaving {write_path} "
+            "untouched instead of saving it.",
+            quiet=quiet,
+        )
+        return
     write_path.parent.mkdir(parents=True, exist_ok=True)
     write_path.write_text(final_text)
     ui.print_notice(
@@ -73,14 +113,18 @@ def _apply_write_fallback(
 def _friendly_error(e: Exception) -> str:
     """Turn a raw exception into something a terminal user can act on.
 
-    Groq's rate-limit responses (HTTP 413/429) already carry a precise,
-    well-formed message naming exactly which budget was hit — requests or
-    tokens, per minute or per day — and how long to wait. Surface that
-    directly rather than guessing from the status code alone: a 429 can
-    mean requests-per-minute (our own throttle() should prevent that one),
-    but it can just as easily mean the *daily* token quota is exhausted,
-    which is a completely different situation with a completely different
-    fix (wait, it's unrelated to conversation size, /clear won't help).
+    A provider's rate-limit response (HTTP 413/429) usually carries a
+    precise, well-formed message naming exactly which budget was hit —
+    requests or tokens, per minute or per day — and how long to wait.
+    Surface that directly rather than guessing from the status code alone:
+    a 429 can mean requests-per-minute (our own throttle() should prevent
+    that one, though it only paces the *active* provider's own budget — see
+    config.py's `_rpm_for`), but it can just as easily mean the *daily*
+    token quota is exhausted, which is a completely different situation
+    with a completely different fix (wait, it's unrelated to conversation
+    size, /clear won't help). Deliberately provider-neutral in the
+    fallback branch below (no detail to surface): this fires for whichever
+    provider `--model` is actually pointed at, not just Groq.
     """
     if isinstance(e, ModelHTTPError) and e.status_code in (413, 429):
         detail = e.body.get("error", {}).get("message") if isinstance(e.body, dict) else None
@@ -88,8 +132,8 @@ def _friendly_error(e: Exception) -> str:
             return f"{e.model_name} rejected the request (HTTP {e.status_code}): {detail}"
         return (
             f"{e.model_name} rejected the request (HTTP {e.status_code}) — "
-            "likely a Groq rate limit. Wait and try again, or switch "
-            "models with --model."
+            "likely a rate limit. Wait and try again, or switch models "
+            "with --model."
         )
     return str(e)
 
@@ -165,6 +209,24 @@ async def one_shot(
     save_session(cfg, message_history)
 
 
+def _debug_preview(text: str, limit: int = 200) -> str:
+    """A stderr-safe preview of model output: bounded, and with brace
+    characters swapped for lookalike fullwidth ones (｛｝, not {}).
+
+    These previews land in --verify's disagreement-path stderr notices,
+    which a caller like a subprocess wrapper may reasonably capture as
+    fallback diagnostic text when stdout comes back empty. If that text
+    still contained real `{...}` braces, a naive "scan for the first
+    balanced JSON object" caller downstream could reconstruct and act on
+    the very primary answer `--verify` just deliberately withheld — silently
+    defeating the disagreement contract documented on verify_mode below.
+    Swapping the ASCII braces for fullwidth lookalikes keeps the preview
+    readable to a human while making it un-parseable as JSON.
+    """
+    body = text.strip().replace("\n", " ")[:limit]
+    return body.translate({ord("{"): "｛", ord("}"): "｝"})
+
+
 async def verify_mode(cfg: Config, prompt: str) -> None:
     """Independent-verifier decision mode — see verify.py's module docstring.
 
@@ -178,6 +240,11 @@ async def verify_mode(cfg: Config, prompt: str) -> None:
     disagreement too. Inventing a different signal would need every such
     caller to learn a second failure shape for what is, to them, the same
     situation: no trustworthy answer this attempt.
+
+    The stderr notices below use `_debug_preview`, not the raw texts,
+    specifically so this path's diagnostics can never be mistaken for the
+    withheld answer by a downstream best-effort JSON scanner — see that
+    helper's docstring for the concrete failure this closes.
     """
     from . import verify as verify_mod
 
@@ -193,9 +260,9 @@ async def verify_mode(cfg: Config, prompt: str) -> None:
         ui.print_error(_friendly_error(e))
         raise SystemExit(1) from e
 
-    ui.print_notice(f"verify: primary={primary_text!r}", quiet=True)
-    ui.print_notice(f"verify: verifier={verifier_text!r}", quiet=True)
-    ui.print_notice(f"verify: verdict={verdict!r}", quiet=True)
+    ui.print_notice(f"verify: primary={_debug_preview(primary_text)!r}", quiet=True)
+    ui.print_notice(f"verify: verifier={_debug_preview(verifier_text)!r}", quiet=True)
+    ui.print_notice(f"verify: verdict={_debug_preview(verdict)!r}", quiet=True)
 
     if agreed:
         sys.stdout.write(primary_text)

@@ -118,13 +118,21 @@ async def get_verifier_answer(cfg: Config, prompt: str, usage_limits: UsageLimit
         return await _run_external_verifier(cmd, prompt, timeout)
 
     model = os.environ.get("TCODE_VERIFY_MODEL", "").strip() or _default_verify_model(cfg.model)
-    verify_cfg = dataclasses.replace(cfg, model=model)
+    # provider/provider_api_key pinned back to Groq explicitly, not just
+    # left as `cfg`'s — the default verifier is always a second Groq model
+    # (see this function's docstring) even when the primary model has moved
+    # to a different provider via --model provider:model_id, and a plain
+    # `dataclasses.replace(cfg, model=model)` would otherwise carry the
+    # primary's own (possibly non-Groq) provider/key over unchanged, pairing
+    # a Groq model id with the wrong backend entirely.
+    verify_cfg = dataclasses.replace(cfg, model=model, provider="groq", provider_api_key=cfg.api_key)
     agent = build_agent(verify_cfg)
-    # Same shared cross-process throttle the main turn loop uses (see
-    # cli.py/runner.py) — this is a second Groq request the main loop
-    # doesn't know about, and Groq enforces RPM per account, not per call
-    # site or process.
-    await throttle(cfg.rpm_state_file, cfg.max_rpm)
+    # Same shared cross-process throttle the main turn loop uses when the
+    # primary is also on Groq (see cli.py/runner.py) — this is always a
+    # second Groq request the main loop doesn't know about regardless of
+    # what the primary model's own provider is, and Groq enforces RPM per
+    # account, not per call site or process.
+    await throttle(cfg.groq_rpm_state_file, cfg.groq_max_rpm)
     result = await agent.run(prompt, usage_limits=usage_limits)
     return str(result.output)
 
@@ -143,7 +151,10 @@ async def compare(cfg: Config, primary_text: str, verifier_text: str) -> tuple[b
     if not primary_text.strip() or not verifier_text.strip():
         return False, "DISAGREE\nOne side produced no answer to compare."
     agent = _compare_agent(cfg)
-    await throttle(cfg.rpm_state_file, cfg.max_rpm)
+    # _compare_agent is always Groq (hardcoded GroqProvider/_COMPARE_MODEL
+    # above) regardless of the primary model's own provider — pace against
+    # Groq's own budget specifically, same reasoning as get_verifier_answer.
+    await throttle(cfg.groq_rpm_state_file, cfg.groq_max_rpm)
     result = await agent.run(f"ANSWER A (primary):\n{primary_text}\n\nANSWER B (verifier):\n{verifier_text}")
     text = str(result.output).strip()
     agreed = text.upper().startswith("AGREE")

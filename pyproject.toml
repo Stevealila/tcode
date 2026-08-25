@@ -1,11 +1,11 @@
 [project]
 name = "tcode"
 version = "0.1.0"
-description = "A system-wide terminal coding-agent harness powered by Groq models — a hackable, self-hosted alternative to Claude Code, built on Pydantic AI + Pydantic AI Harness."
+description = "A system-wide terminal coding-agent harness powered by Groq models by default (other providers pluggable) — a hackable, self-hosted alternative to Claude Code, built on Pydantic AI + Pydantic AI Harness."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "pydantic-ai-slim[groq,duckduckgo,web-fetch,tavily]>=2.33.0",
+  "pydantic-ai-slim[groq,google,zai,duckduckgo,web-fetch,tavily]>=2.33.0",
   "pydantic-ai-harness>=0.24.0",
   "python-dotenv>=1.0.1",
   "rich>=13.9.4",

@@ -1,4 +1,5 @@
-"""Assembles the Pydantic AI agent: a Groq model plus harness capabilities.
+"""Assembles the Pydantic AI agent: the primary model (Groq by default, or
+another provider — see _build_model) plus harness capabilities.
 
 This hand-assembles the same pieces `pydantic_ai_harness.Coder` composes
 (FileSystem, Shell, RepoContext, Planning, a read-only explorer sub-agent,
@@ -197,9 +198,56 @@ def _explorer(workspace: str | Path) -> SubAgent:
     return SubAgent(agent)
 
 
+def _build_model(cfg: Config):
+    """The primary turn's model — on whichever provider cfg.provider names.
+
+    Groq is the only provider imported unconditionally (see module
+    docstring): it's tcode's zero-setup default, so its client library is a
+    hard dependency. Every other provider is imported lazily, right here,
+    so installing tcode with just the Groq extra still works for every
+    caller who never asks for one — see config.py's parse_model_spec for
+    how a --model value picks a provider in the first place.
+    """
+    if cfg.provider == "groq":
+        provider = GroqProvider(api_key=cfg.provider_api_key)
+        return GroqModel(cfg.model, provider=provider)
+    if cfg.provider == "google":
+        try:
+            from pydantic_ai.models.google import GoogleModel
+            from pydantic_ai.providers.google import GoogleProvider
+        except ImportError as e:
+            raise RuntimeError(
+                "--model google:... needs the google-genai package, which isn't "
+                'installed. Add the `google` extra (pydantic-ai-slim[groq,google]) '
+                "and reinstall to use it."
+            ) from e
+        provider = GoogleProvider(api_key=cfg.provider_api_key)
+        return GoogleModel(cfg.model, provider=provider)
+    if cfg.provider == "zai":
+        try:
+            from pydantic_ai.models.openai import OpenAIChatModel
+            from pydantic_ai.providers.zai import ZaiProvider
+        except ImportError as e:
+            raise RuntimeError(
+                "--model zai:... needs the openai package, which isn't installed. "
+                'Add the `zai` extra (pydantic-ai-slim[groq,zai]) and reinstall to use it.'
+            ) from e
+        # Z.AI is OpenAI-Chat-Completions-compatible (see ZaiProvider), not
+        # a bespoke model class the way Groq/Google are.
+        provider = ZaiProvider(api_key=cfg.provider_api_key)
+        return OpenAIChatModel(cfg.model, provider=provider)
+    # Unreachable: config.py's parse_model_spec only ever returns a
+    # provider name from the same registry this function's branches cover.
+    raise AssertionError(f"no model builder wired up for provider {cfg.provider!r}")
+
+
 def build_agent(cfg: Config) -> Agent:
-    provider = GroqProvider(api_key=cfg.api_key)
-    model = GroqModel(cfg.model, provider=provider)
+    model = _build_model(cfg)
+    # file_capabilities/web_capabilities' own internal distillation agents
+    # are always Groq (see distill.py's DISTILL_MODEL) regardless of what
+    # provider the primary model above is on — a second, always-Groq
+    # provider object, deliberately separate from `model`'s own.
+    groq_provider = GroqProvider(api_key=cfg.api_key)
 
     workspace = str(cfg.cwd)
     capabilities = [
@@ -226,7 +274,7 @@ def build_agent(cfg: Config) -> Agent:
         # Always on, unlike web_capabilities: this is a FileSystem gap
         # (large local files), not something that needs an external
         # capability or API key. See files.py's module docstring.
-        *file_capabilities(cfg, provider),
+        *file_capabilities(cfg, groq_provider),
     ]
     if cfg.shell:
         capabilities.append(
@@ -237,7 +285,7 @@ def build_agent(cfg: Config) -> Agent:
             )
         )
     if cfg.web_search:
-        capabilities += web_capabilities(cfg, provider)
+        capabilities += web_capabilities(cfg, groq_provider)
     capabilities += [
         SubAgents(agents=[_explorer(workspace)], agent_folders=None),
         # Technical backstop for the "scope exploration" instruction above:

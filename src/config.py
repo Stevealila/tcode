@@ -26,6 +26,83 @@ DEFAULT_READONLY = False
 
 GLOBAL_DIR = Path.home() / ".tcode"
 
+# Groq is the zero-setup default this whole tool is built around (one free
+# key, see README), but the model that does best on a given task isn't
+# always hosted there — Groq's own catalog is small and changes over time.
+# `--model provider:model_id` addresses a model on a different backend
+# instead; a bare model id with no recognized `provider:` prefix (every
+# existing config, script, and habit predating this) is still read as a
+# Groq model id, unchanged. Extend this dict (plus the matching branch in
+# agent.py's build_agent) to wire up another backend — the api-key env var
+# and per-provider RPM default are the only two pieces of config a new one
+# needs here.
+_PROVIDER_API_KEY_ENV = {
+    "groq": "GROQ_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    # Z.AI's own env var name (ZaiProvider reads it directly) — kept as-is
+    # rather than a tcode-specific name so a key already set for another
+    # pydantic_ai-based tool just works here too.
+    "zai": "ZAI_API_KEY",
+}
+
+# Each provider enforces its own account-wide rate limit, so a shared
+# default tuned for Groq's tier would either throttle a roomier provider
+# for no reason or, worse, undershoot a tighter one and draw real 429s.
+# TCODE_MAX_RPM still overrides this outright when set, same as before.
+_DEFAULT_MAX_RPM_BY_PROVIDER = {
+    "groq": 30,
+    # Google AI Studio's free tier is a flat 15 RPM per project as of
+    # 2026-08; conservative on purpose since Google no longer publishes one
+    # authoritative number and per-project limits vary.
+    "google": 15,
+    # Z.AI's free GLM-*-Flash models publish a daily request cap, not an
+    # official RPM figure — 15 is a conservative guess pending real usage,
+    # same posture as google's above.
+    "zai": 15,
+}
+
+
+def parse_model_spec(raw: str) -> tuple[str, str]:
+    """Split a --model value into (provider, model_id).
+
+    Groq model ids never contain `:` (they're bare names or `org/name`), so
+    a bare string is unambiguous as "no prefix, assume groq" — the only
+    behavior that existed before this and the only one most callers will
+    ever hit. `provider:model_id` opts into a different backend; an
+    unrecognized prefix is a config error rather than being silently folded
+    into the model id (better than a confusing "model not found" from
+    Groq's API for a caller who just mistyped the provider name).
+    """
+    if ":" in raw:
+        prefix, _, rest = raw.partition(":")
+        if rest:
+            if prefix not in _PROVIDER_API_KEY_ENV:
+                known = ", ".join(sorted(_PROVIDER_API_KEY_ENV))
+                raise ConfigError(f"Unknown provider {prefix!r} in --model {raw!r}. Known providers: {known}.")
+            return prefix, rest
+    return "groq", raw
+
+
+def _rpm_for(provider: str) -> tuple[int, Path]:
+    """(max_rpm, state_file) for `provider`'s own shared rate-limit budget.
+
+    TCODE_MAX_RPM, if set, overrides Groq's specifically — that variable
+    predates multi-provider support, and every existing use of it means "my
+    Groq account". A non-Groq provider gets its own conservative default
+    from _DEFAULT_MAX_RPM_BY_PROVIDER instead, since a different account has
+    a different limit entirely and no existing config was ever tuning it.
+    Each provider gets its own state file so two providers' shared
+    cross-process throttles never interleave; Groq keeps the original
+    unsuffixed path so an existing ~/.tcode/rpm_state isn't orphaned.
+    """
+    if provider == "groq":
+        rpm = int(os.environ.get("TCODE_MAX_RPM", DEFAULT_MAX_RPM))
+        state_file = GLOBAL_DIR / "rpm_state"
+    else:
+        rpm = _DEFAULT_MAX_RPM_BY_PROVIDER.get(provider, DEFAULT_MAX_RPM)
+        state_file = GLOBAL_DIR / f"rpm_state_{provider}"
+    return rpm, state_file
+
 
 def _slugify(path: Path) -> str:
     """Turn an absolute path into a filesystem-safe slug, e.g.
@@ -57,6 +134,18 @@ class Config:
     cwd: Path
     api_key: str
     model: str
+    # "groq" unless --model used a provider:model_id prefix — see
+    # parse_model_spec. build_agent (agent.py) branches on this to pick the
+    # right Model/Provider class; everything Groq-only by design (the
+    # map/digest distillation model, --verify's compare/default-verifier
+    # model) ignores it and keeps using `api_key` regardless, since those
+    # call sites hardcode Groq model ids independent of the primary model.
+    provider: str
+    # The API key for `provider` specifically — same value as `api_key`
+    # when provider == "groq" (the common case), a different env var's
+    # value otherwise. `api_key` itself always stays the Groq key: several
+    # call sites need it even when the primary model isn't on Groq.
+    provider_api_key: str
     request_limit: int
     allowed_commands: list[str]
     shell: bool
@@ -65,10 +154,12 @@ class Config:
     keep_tool_pairs: int
     clear_after_tokens: int
     max_rpm: int
+    groq_max_rpm: int
     web_search: bool
     tavily_api_key: str | None
     write_scope: list[str]
     rpm_state_file: Path
+    groq_rpm_state_file: Path
     project_slug: str
     project_dir: Path
     memory_dir: Path
@@ -102,7 +193,22 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
             "Get a key at https://console.groq.com/keys"
         )
 
-    model = model_override or os.environ.get("GROQ_MODEL", "").strip() or DEFAULT_MODEL
+    model_spec = model_override or os.environ.get("GROQ_MODEL", "").strip() or DEFAULT_MODEL
+    provider, model = parse_model_spec(model_spec)
+    if provider == "groq":
+        provider_api_key = api_key
+    else:
+        key_env = _PROVIDER_API_KEY_ENV[provider]
+        provider_api_key = os.environ.get(key_env, "").strip()
+        if not provider_api_key:
+            raise ConfigError(
+                f"--model {model_spec!r} needs {key_env}, which is not set.\n\n"
+                f"Add it to a .env file in this directory ({cwd / '.env'}) or to "
+                f"your global config ({GLOBAL_DIR / '.env'}):\n\n"
+                f"  {key_env}=...\n\n"
+                "(GROQ_API_KEY stays required regardless — tcode's own "
+                "distillation and --verify passes are Groq-only by design.)"
+            )
     request_limit = int(os.environ.get("GROQ_REQUEST_LIMIT", DEFAULT_REQUEST_LIMIT))
 
     # An empty list here means "denylist mode": Shell blocks a short list of
@@ -146,10 +252,26 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     )
 
     # Requests-per-minute is a separate, harder limit from tokens-per-minute,
-    # and Groq enforces it per account, not per process. The throttle state
-    # lives in one shared global file, not per-project, so it applies across
-    # every tcode invocation hitting this account. 0 disables it.
-    max_rpm = int(os.environ.get("TCODE_MAX_RPM", DEFAULT_MAX_RPM))
+    # and each provider enforces it per account, not per process — the
+    # throttle state lives in one shared global file per provider, not per
+    # project, so it applies across every tcode invocation hitting that
+    # account. 0 disables it (TCODE_MAX_RPM only, and only for Groq — see
+    # _rpm_for).
+    #
+    # Two separate budgets, not one: distill.py's map/digest passes and
+    # verify.py's compare/default-verifier passes are Groq-only by design
+    # regardless of what the primary model is (see the `provider` field
+    # above), so they must keep pacing against Groq's own limit even when
+    # the primary model has moved to a different provider — otherwise a
+    # primary model on a roomier (or tighter) provider would silently pace
+    # Groq's shared account wrong. `max_rpm`/`rpm_state_file` track
+    # whichever provider is actually active (the primary model's own
+    # throttle, used by runner.py); `groq_max_rpm`/`groq_rpm_state_file`
+    # always track Groq specifically. The two are identical whenever
+    # provider == "groq" — the common case — so this changes nothing for
+    # any existing single-provider setup.
+    max_rpm, rpm_state_file = _rpm_for(provider)
+    groq_max_rpm, groq_rpm_state_file = _rpm_for("groq")
 
     # Web search/fetch: on by default, zero setup (DuckDuckGo search + a
     # distilling fetch, see web.py). Set TCODE_WEB_SEARCH=0 to turn it off,
@@ -199,6 +321,8 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         cwd=cwd,
         api_key=api_key,
         model=model,
+        provider=provider,
+        provider_api_key=provider_api_key,
         request_limit=request_limit,
         allowed_commands=allowed_commands,
         shell=shell,
@@ -207,10 +331,12 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         keep_tool_pairs=keep_tool_pairs,
         clear_after_tokens=clear_after_tokens,
         max_rpm=max_rpm,
+        groq_max_rpm=groq_max_rpm,
         web_search=web_search,
         tavily_api_key=tavily_api_key,
         write_scope=write_scope,
-        rpm_state_file=GLOBAL_DIR / "rpm_state",
+        rpm_state_file=rpm_state_file,
+        groq_rpm_state_file=groq_rpm_state_file,
         project_slug=slug,
         project_dir=project_dir,
         memory_dir=memory_dir,
