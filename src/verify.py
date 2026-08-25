@@ -43,6 +43,7 @@ from pydantic_ai.models.groq import GroqModel, GroqModelSettings
 
 from .agent import build_agent
 from .config import Config
+from .ratelimit import throttle
 
 # Cheap, fast, low-reasoning — this is a substance-match judgment over two
 # short texts, not a task that benefits from a bigger model or deliberation.
@@ -119,6 +120,11 @@ async def get_verifier_answer(cfg: Config, prompt: str, usage_limits: UsageLimit
     model = os.environ.get("TCODE_VERIFY_MODEL", "").strip() or _default_verify_model(cfg.model)
     verify_cfg = dataclasses.replace(cfg, model=model)
     agent = build_agent(verify_cfg)
+    # Same shared cross-process throttle the main turn loop uses (see
+    # cli.py/runner.py) — this is a second Groq request the main loop
+    # doesn't know about, and Groq enforces RPM per account, not per call
+    # site or process.
+    await throttle(cfg.rpm_state_file, cfg.max_rpm)
     result = await agent.run(prompt, usage_limits=usage_limits)
     return str(result.output)
 
@@ -137,6 +143,7 @@ async def compare(cfg: Config, primary_text: str, verifier_text: str) -> tuple[b
     if not primary_text.strip() or not verifier_text.strip():
         return False, "DISAGREE\nOne side produced no answer to compare."
     agent = _compare_agent(cfg)
+    await throttle(cfg.rpm_state_file, cfg.max_rpm)
     result = await agent.run(f"ANSWER A (primary):\n{primary_text}\n\nANSWER B (verifier):\n{verifier_text}")
     text = str(result.output).strip()
     agreed = text.upper().startswith("AGREE")
