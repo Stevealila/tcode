@@ -16,7 +16,14 @@ to hide its three internal model calls behind one answer:
      directory, a generic structural signal (files a filesystem already
      put together are presumably related) rather than anything specific
      to one caller's domain, then each group gets its own concurrent
-     digest pass before the final reduce ever sees it.
+     digest pass before the final reduce ever sees it. If that pass still
+     leaves more than `GROUP_THRESHOLD` digests (many small groups, not
+     a few oversized ones — directory count, not file count, is what's
+     past the cap), it folds again in further stages, batching digests
+     into digests, until the count is small enough for the final reduce
+     to see reliably — same digest mechanism, just applied to its own
+     output as many times as the fan-in actually needs, not raising the
+     per-call ceiling to match whatever showed up.
   3. reduce — one ordinary tcode turn (full capabilities, respects
      `--quiet`, can write_file if the prompt asks it to) over the
      collected map/digest output plus the caller's original prompt.
@@ -191,6 +198,35 @@ async def run_reduce(
                 for label, items in chunks
             )
         )
+
+    # The pass above caps each GROUP's raw-file count at GROUP_THRESHOLD, but
+    # not the total number of groups reaching the final reduce turn — a
+    # caller with many small directories (many groups, few files each) sails
+    # straight through that cap with the group *count* itself still past
+    # what one reduce turn is reliable for. Confirmed at production scale:
+    # the primary model held through 20-40 groups but was only ~1/3 reliable
+    # at 80 — the same "prints the tool call as text" failure --write's own
+    # fallback exists to catch, just at a fan-in real callers weren't near
+    # yet. Folding here, not raising GROUP_THRESHOLD itself, keeps every
+    # individual digest call at the same tested-safe size regardless of how
+    # many there end up being: each pass digests batches of up to
+    # GROUP_THRESHOLD *digests* into one, same _digest_group used above,
+    # applied to its own output. GROUP_THRESHOLD (12) means this halves-ish
+    # the count each pass, so even a pathological fan-in converges in a
+    # couple of stages, not a long or unbounded chain.
+    stage = 2
+    while len(map_results) > GROUP_THRESHOLD:
+        stage_chunks = [
+            (f"stage{stage}[{i}:{i + GROUP_THRESHOLD}]", map_results[i : i + GROUP_THRESHOLD])
+            for i in range(0, len(map_results), GROUP_THRESHOLD)
+        ]
+        map_results = await asyncio.gather(
+            *(
+                _digest_group(distill_agent, cfg, label, items, extraction_prompt, quiet=quiet)
+                for label, items in stage_chunks
+            )
+        )
+        stage += 1
 
     combined = "\n\n".join(f"## {label}\n{text}" for label, text in map_results)
     final_prompt = (
