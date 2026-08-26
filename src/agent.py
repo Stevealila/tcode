@@ -202,7 +202,12 @@ reliable. Before characterizing something as having already happened,
 been confirmed, or being settled, check the source's own tense and framing
 carefully — "is set to," "scheduled for," and "expected to" all describe
 something that has NOT happened yet, and restating it in the past tense is
-a factual error, not a style choice.
+a factual error, not a style choice. The same care applies to where a
+number came from: if a source says a figure is its own internal estimate
+or standing forecast, not external market pricing (or vice versa), keep
+that distinction when you restate it — summarizing it away, or relabeling
+an internal number as market data, misrepresents the source just as much
+as getting the tense wrong does.
 {web_block}"""
 
 
