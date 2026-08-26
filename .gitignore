@@ -4,4 +4,5 @@ __pycache__/
 dist/
 .env
 images/
+betterment/
 improvements_bt.txt
