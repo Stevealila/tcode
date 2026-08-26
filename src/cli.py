@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -66,6 +68,90 @@ def _looks_like_leaked_tool_call(text: str) -> bool:
     return any(marker in text for marker in _LEAKED_TOOL_CALL_MARKERS)
 
 
+_LEAKED_CONTENT_KEY = re.compile(r'"(?:content|new_text)"\s*:\s*"')
+_JSON_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f"}
+
+
+def _unescape_json_string_prefix(raw: str) -> str:
+    """Decode JSON string escapes in `raw`, tolerating an incomplete
+    trailing escape (a lone backslash, or a cut-off `\\uXXXX`) by dropping
+    it rather than raising. `raw` may be a genuinely truncated JSON string
+    value, not a complete, valid one — see
+    `_extract_leaked_write_payload`'s docstring for why that happens.
+    """
+    out: list[str] = []
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            break  # dangling backslash at the very end — drop it
+        nxt = raw[i + 1]
+        if nxt == "u":
+            if i + 6 <= n:
+                try:
+                    out.append(chr(int(raw[i + 2 : i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    break
+            break  # incomplete \uXXXX at the end — drop it
+        out.append(_JSON_ESCAPES.get(nxt, nxt))
+        i += 2
+    return "".join(out)
+
+
+def _extract_leaked_write_payload(text: str) -> tuple[str | None, bool]:
+    """Best-effort recovery of a write_file/edit_file call's own
+    `content`/`new_text` argument from a leaked JSON-shaped tool call.
+
+    Returns `(extracted_text, was_truncated)` — `extracted_text` is `None`
+    when nothing recoverable was found at all. Tries a strict JSON parse
+    first (the leak is genuinely complete, just never turned into a real
+    call); falls back to a raw scan for the `"content"`/`"new_text"` key's
+    string value when that fails, which is what happens when the model's
+    own generation was cut off mid-JSON — observed on google:gemma-4-31b-it
+    composing a large --reduce rollup: the same tool-call payload, retried
+    three times by run_turn, grew a little further each time before
+    truncating at the same spot in its output budget, not a one-off
+    formatting fluke. A truncated partial recovery is still returned
+    (flagged, not silently passed off as complete) rather than discarded:
+    an incomplete-but-real, actually-cited rollup is worth far more to a
+    caller than nothing — the same "salvage over discard" call --write's
+    whole existence already makes for a cleaner failure shape.
+    """
+    stripped = text.strip()
+    try:
+        obj = json.loads(stripped)
+        args = obj.get("arguments")
+        if isinstance(args, dict):
+            for key in ("content", "new_text"):
+                value = args.get(key)
+                if isinstance(value, str):
+                    return value, False
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+
+    match = _LEAKED_CONTENT_KEY.search(stripped)
+    if not match:
+        return None, False
+    raw = stripped[match.end() :]
+    i = 0
+    while i < len(raw):
+        if raw[i] == "\\":
+            i += 2
+            continue
+        if raw[i] == '"':
+            return _unescape_json_string_prefix(raw[:i]), False
+        i += 1
+    # No closing quote found anywhere in the leaked text — the model's own
+    # generation was cut off mid-string, not just mid-JSON-structure.
+    return _unescape_json_string_prefix(raw), True
+
+
 def _apply_write_fallback(
     write_path: Path | None, before_mtime: float | None, final_text: str, *, quiet: bool
 ) -> None:
@@ -85,6 +171,37 @@ def _apply_write_fallback(
     if not final_text.strip():
         return
     if _looks_like_leaked_tool_call(final_text):
+        # Not automatically unsalvageable: the leaked JSON/pseudo-XML is
+        # usually the model's own genuine write_file/edit_file call, just
+        # never turned into a real one — its `content`/`new_text` argument
+        # is often a perfectly good answer sitting right there. Recover it
+        # if we can; only fall through to refusing the write (below) when
+        # nothing recoverable is found at all. Writing the RAW leaked text
+        # verbatim would still be worse than writing nothing (see the
+        # comment on that path) — the difference here is trying to salvage
+        # the payload first instead of jumping straight to refusal.
+        salvaged, truncated = _extract_leaked_write_payload(final_text)
+        if salvaged is not None:
+            if truncated:
+                salvaged += (
+                    "\n\n[tcode: recovered from a leaked, incomplete tool "
+                    "call — the model's own generation was cut off "
+                    "partway through, so this stops mid-sentence/"
+                    "mid-section. Treat it as a partial answer, not a "
+                    "finished one.]"
+                )
+            write_path.parent.mkdir(parents=True, exist_ok=True)
+            write_path.write_text(salvaged)
+            ui.print_notice(
+                f"--write: the model's own write didn't land this turn, "
+                f"and its final answer looked like a leaked, unexecuted "
+                f"tool call — recovered the "
+                f"{'truncated ' if truncated else ''}content from inside "
+                f"it and wrote that to {write_path} instead of leaving it "
+                "empty.",
+                quiet=quiet,
+            )
+            return
         # Writing this would be worse than writing nothing: it dresses up
         # as a successful save (file now exists, mtime changed, a
         # reassuring notice) while the content is the model's own
