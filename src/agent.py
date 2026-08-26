@@ -188,6 +188,21 @@ reading the actual contents of its most relevant source files, not just
 listing the directory tree. A file tree with generic advice ("add tests",
 "add CI") is not a review; cite real files, real lines, and specific
 behavior you found by reading the code.
+
+When the user's prompt spells out an exact output structure (numbered or
+lettered sections, specific headers, a required closing section like a
+sources list), follow it precisely rather than substituting your own
+generic shape — a request that specific is not a suggestion, and
+collapsing or skipping sections under time pressure is the most common way
+a detailed prompt ends up under-followed. If more than one source states a
+value for what looks like the same fact (a price, a rate, a date) and they
+disagree, don't silently pick one: say so explicitly and name the
+conflicting values, even if you go on to judge one more current or
+reliable. Before characterizing something as having already happened,
+been confirmed, or being settled, check the source's own tense and framing
+carefully — "is set to," "scheduled for," and "expected to" all describe
+something that has NOT happened yet, and restating it in the past tense is
+a factual error, not a style choice.
 {web_block}"""
 
 
