@@ -23,6 +23,22 @@ technical teeth:
   "changed by this run" and get wrongly reverted. Checking the tool call's
   own path argument up front avoids both: same allow-list-not-convention
   approach `protected_patterns` already uses for `.env`/`*.pem`/secrets.
+- `UrlLedger` catches a model writing a URL it mangled in transcription —
+  truncated mid-word, trailing an ellipsis — even though a tool result
+  handed it the real one intact this same run. Two ToolGuardrails share one
+  instance: `record` (a result_guard on every tool) remembers every URL a
+  tool result actually contained, `check_write` (an argument guard on the
+  write tools) rejects a write whose text contains something that looks
+  like a mangled copy of one. Always on — see tcode_improvements.txt's
+  Finding 5, the reproducible case this closes.
+- `citation_paths_exist` rejects a write that cites (backtick-quoted, e.g.
+  `` `profiles/bessent/daily/2026-08-23.md` ``) a source file that doesn't
+  exist under the workspace — the single most repeated failure shape in
+  tcode_improvements.txt's audit (Finding 1: citing a file that was never
+  written). Opt-in (`TCODE_CHECK_CITATIONS`, see config.py), not always-on
+  like the others here: a generic coding session legitimately proposes
+  paths that don't exist *yet* (a file to create next), which this can't
+  tell apart from a fabricated citation.
 """
 
 from __future__ import annotations
@@ -32,7 +48,7 @@ import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo
+from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo, ToolResultInfo
 
 _SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|]")
 _BROAD_TARGETS = {"", ".", "~", "$HOME"}
@@ -129,6 +145,105 @@ def scope_writes_to(workspace: str | Path, scopes: Sequence[str]):
             f"{' or '.join(s.rstrip('/') + '/' for s in scopes)} may be "
             "created or modified. If the task doesn't fit there, say so "
             "instead of writing elsewhere."
+        )
+
+    return guard
+
+
+def _write_text(call: ToolCallInfo) -> str:
+    """The text a write-capable tool call is about to put on disk.
+
+    `write_file(path, content)` and `edit_file(path, old_text, new_text)`
+    name it differently; `create_directory(path)` has neither, so this
+    reads as an empty string for it — nothing worth scanning there anyway.
+    """
+    return str(call.args.get("content", call.args.get("new_text", "")))
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>\)\]]+")
+
+
+def _looks_truncated(url: str, seen: set[str]) -> bool:
+    """Whether `url` looks like a mangled copy of something already seen.
+
+    Two independent signals, either enough on its own: it visibly trails
+    off (an ellipsis or literal "...", the exact shape tcode_improvements
+    .txt's Finding 5 reproduced — Tavily/web_fetch handed the model an
+    intact URL and it still wrote a cut-off one to the file), or it's a
+    strict prefix of a longer URL this run's own tool results actually
+    contained — the mechanical case a post-write check can catch with no
+    model judgment involved at all.
+    """
+    if url.rstrip(").,;:!?]}").endswith(("…", "...")):
+        return True
+    return any(seen_url != url and seen_url.startswith(url) for seen_url in seen)
+
+
+class UrlLedger:
+    """Remembers every URL a tool result actually returned this run, so a
+    later write can be checked against it — see `_looks_truncated` above.
+
+    One instance per agent (built once in agent.py's build_agent), shared
+    between two `ToolGuardrail`s: `record` (a `result_guard`, every tool)
+    fills the ledger in as results come back; `check_write` (an argument
+    guard, write tools only) reads it back before a write lands. Sharing
+    state this way — rather than each guard reaching into run history
+    itself — is what lets `check_write` compare against everything seen
+    so far without needing its own copy of the conversation.
+    """
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    def record(self, result: ToolResultInfo) -> GuardrailResult:
+        self.seen.update(_URL_IN_TEXT.findall(str(result.result)))
+        return GuardrailResult.allow()
+
+    def check_write(self, call: ToolCallInfo) -> GuardrailResult:
+        bad = sorted({u for u in _URL_IN_TEXT.findall(_write_text(call)) if _looks_truncated(u, self.seen)})
+        if not bad:
+            return GuardrailResult.allow()
+        return GuardrailResult.retry(
+            "This content includes a URL that looks truncated or garbled "
+            f"partway through ({'; '.join(bad)}) rather than copied in full "
+            "from the search/fetch result it came from. Copy it exactly as "
+            "given, or leave it out rather than writing a partial one."
+        )
+
+
+_CITED_PATH = re.compile(r"`([\w][\w./-]*(?:/[\w][\w./-]*)+\.[A-Za-z0-9]{1,5})`")
+
+
+def citation_paths_exist(workspace: str | Path):
+    """Build a guard rejecting a write that cites a source file which
+    doesn't actually exist under `workspace`.
+
+    Scoped deliberately narrow: only a backtick-quoted, slash-containing,
+    extensioned path — the shape a model uses when citing a file it read
+    (`` `profiles/bessent/daily/2026-08-23.md` ``) — not any bare filename
+    mentioned in prose. `TCODE_CHECK_CITATIONS` opts in (see config.py)
+    rather than this running always: a generic coding session legitimately
+    proposes paths that don't exist yet (a file to create next), which
+    this has no way to tell apart from a fabricated citation — the failure
+    mode it exists for (tcode_improvements.txt's Finding 1) is specific to
+    a caller whose output is citations of files it was actually handed.
+    """
+    root = Path(workspace).resolve()
+
+    def _exists(rel_path: str) -> bool:
+        resolved = (root / rel_path).resolve()
+        return resolved.is_relative_to(root) and resolved.is_file()
+
+    def guard(call: ToolCallInfo) -> GuardrailResult:
+        cited = set(_CITED_PATH.findall(_write_text(call)))
+        missing = sorted(p for p in cited if not _exists(p))
+        if not missing:
+            return GuardrailResult.allow()
+        return GuardrailResult.retry(
+            "This content cites a source file that doesn't exist under "
+            f"this workspace: {', '.join(missing)}. Only cite a file you "
+            "actually read this run — remove the citation or fix the path "
+            "instead of leaving a reference to something that isn't there."
         )
 
     return guard

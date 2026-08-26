@@ -122,7 +122,7 @@ def _search_capability(cfg: Config) -> WebSearch:
 
 
 def _make_web_fetch_tool(cfg: Config, provider: GroqProvider) -> Tool:
-    distill_agent = make_distill_agent(provider)
+    distill_agent = make_distill_agent(provider, cfg.distill_model)
     base_fetch = web_fetch_tool()
 
     async def web_fetch(url: str, prompt: str) -> str | BinaryContent:

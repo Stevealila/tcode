@@ -38,6 +38,8 @@ TCODE_ALLOWED_COMMANDS=git,pytest  # optional, see "Shell access" below
 TCODE_MAX_RPM=30                   # optional, client-side requests/min throttle (0 disables)
 TCODE_WEB_SEARCH=1                 # optional, web search/fetch tools (default on, 0 disables)
 TAVILY_API_KEY=tvly-...            # optional, better web search — see "Web search" below
+TCODE_CHECK_CITATIONS=1            # optional, reject a write citing a source file that doesn't exist (default off)
+TCODE_DISTILL_MODEL=openai/gpt-oss-120b  # optional, a stronger Groq model for the internal distillation pass (default gpt-oss-20b)
 ```
 
 Get a key at <https://console.groq.com/keys>. Real environment variables
@@ -121,6 +123,20 @@ convention: it doesn't consult `.gitignore` and isn't fooled by `../`, so
 it holds even for a target a caller-side `git status` diff would never see
 (a gitignored directory) or shouldn't trust diffing at all (a path some
 other process legitimately rewrites concurrently).
+
+Two more write-time checks, for a caller whose whole job is producing a
+report that cites source files it read this run (a research rollup, say):
+
+- Always on: any write whose text contains a URL that looks like a garbled
+  copy of one a tool result actually returned this run (truncated
+  mid-word, trailing an ellipsis) is rejected and the model is asked to
+  copy it in full or drop it, rather than silently landing a broken link.
+- `TCODE_CHECK_CITATIONS=1` (opt-in — a normal coding session legitimately
+  proposes paths that don't exist *yet*, which this can't tell apart from
+  a fabricated citation): any write whose text cites a backtick-quoted
+  path (`` `profiles/bessent/daily/2026-08-23.md` ``) that doesn't
+  actually exist under the workspace is rejected the same way — catches a
+  model inventing a plausible-sounding source it never actually read.
 
 The prompt can come via stdin instead of an argument too (`echo "..." |
 tcode`, or a subprocess `input=` from another language) — useful once the
@@ -315,6 +331,28 @@ of a glob, for selection logic a glob can't express — a caller's own
 date-range filter, say. The caller keeps owning that logic and just hands
 tcode the resulting list; tcode doesn't need to learn what "the last 14
 days" means for someone else's files.
+
+Every distillation call in this pipeline — the per-file/per-group map and
+digest passes above, plus `read_and_distill` and `web_fetch`'s own
+page-summary step — runs on the same small, cheap Groq model by default
+(`openai/gpt-oss-20b`), regardless of which model `--model` points the
+primary turn at. That's fine for most tasks, but for one whose whole point
+is precise multi-document extraction and citation, this is a hidden
+bottleneck: everything the primary model ever sees about a large file or a
+`--reduce` batch went through this smaller model first, so a misread there
+poisons every downstream turn no matter how good the primary is.
+`TCODE_DISTILL_MODEL=<groq-model-id>` points it at something stronger
+instead (a bare Groq model id, not `provider:model_id` — this pass is
+Groq-only by design, same constraint `TCODE_VERIFY_MODEL` already has).
+
+After the final reduce turn, a cheap heuristic checks whether every input
+group (files grouped by parent directory, same signal used above) actually
+surfaces in the final text at all — by its own distinguishing path
+keywords, not just any mention. If a whole group is missing, a notice
+flags it rather than staying silent: it can't tell "genuinely nothing new
+to report" from "silently dropped during synthesis," but a caller or a
+human watching the logs can at least see the omission and go check, rather
+than trusting an answer that reads as complete when it isn't.
 
 ### `--write PATH`: guaranteeing the answer actually lands on disk
 

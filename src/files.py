@@ -45,7 +45,7 @@ def _make_read_and_distill_tool(cfg: Config, provider: GroqProvider) -> Tool:
     # builds its own toolset, so this can't become a second, differently
     # configured path into the workspace.
     reader = FileSystem(root_dir=str(cfg.cwd), max_read_lines=_MAX_READ_LINES).get_toolset()
-    distill_agent = make_distill_agent(provider)
+    distill_agent = make_distill_agent(provider, cfg.distill_model)
 
     async def read_and_distill(path: str, prompt: str) -> str:
         raw = await reader.read_file(path, limit=_MAX_READ_LINES)

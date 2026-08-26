@@ -54,7 +54,13 @@ from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Trunc
 
 from .config import Config
 from .files import file_capabilities
-from .guardrails import WRITE_TOOLS, scope_shell_exploration, scope_writes_to
+from .guardrails import (
+    WRITE_TOOLS,
+    UrlLedger,
+    citation_paths_exist,
+    scope_shell_exploration,
+    scope_writes_to,
+)
 from .web import current_time_instructions, web_capabilities
 
 
@@ -250,6 +256,7 @@ def build_agent(cfg: Config) -> Agent:
     groq_provider = GroqProvider(api_key=cfg.api_key)
 
     workspace = str(cfg.cwd)
+    url_ledger = UrlLedger()
     capabilities = [
         Capability(
             instructions=[
@@ -305,6 +312,17 @@ def build_agent(cfg: Config) -> Agent:
                 )
             ]
             if cfg.write_scope
+            else []
+        ),
+        # Always on: catches a write whose text mangles a URL a tool result
+        # actually returned intact this run. See guardrails.py's UrlLedger
+        # and its module docstring for the incident that prompted this
+        # (tcode_improvements.txt's Finding 5).
+        ToolGuardrail(result_guard=url_ledger.record),
+        ToolGuardrail(guard=url_ledger.check_write, tools=WRITE_TOOLS),
+        *(
+            [ToolGuardrail(guard=citation_paths_exist(workspace), tools=WRITE_TOOLS)]
+            if cfg.check_citations
             else []
         ),
         # Tuned for Groq's tokens-per-minute budget rather than a generic

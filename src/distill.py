@@ -13,6 +13,22 @@ which single-document extraction doesn't need — cheaper and faster on every
 call, and removes a failure mode this task never needed to risk. (`'none'`
 is rejected outright by this model despite the wider type hint; checked
 against the live API.)
+
+`TCODE_DISTILL_MODEL` overrides this default (see config.py) for a caller
+whose whole task is precise multi-document extraction and citation — a
+research pipeline synthesizing many files via `--reduce`, say — where this
+narrow-looking extraction pass is not actually low-stakes: everything the
+primary model ever sees about a large file, a `--reduce` batch, or a
+fetched web page goes through it first, so a misread here poisons every
+downstream turn regardless of how good the primary model is. The
+`groq_reasoning_effort="low"` forcing above is specific to
+`openai/gpt-oss-20b` needing it (see the model's own case above) — a
+caller opting into a different, presumably-better distillation model wants
+that model's own default reasoning depth, not this one's speed shortcut
+force-fed to it (and, checked against the live API, at least one
+alternative — `qwen/qwen3.6-27b` — rejects `'low'` outright: `` `must be
+one of 'none' or 'default'` ``), so overriding away from `DISTILL_MODEL`
+also drops the forced setting.
 """
 
 from __future__ import annotations
@@ -25,7 +41,9 @@ from pydantic_ai.providers.groq import GroqProvider
 # extraction task (one document, one question), not agentic reasoning, so it
 # doesn't need the main model's capacity — and running it on a separate,
 # smaller model keeps this pass cheap relative to the budget the primary
-# model's turn is already spending.
+# model's turn is already spending. TCODE_DISTILL_MODEL overrides it — see
+# module docstring for why a caller would want to, and config.py for the
+# env var itself.
 DISTILL_MODEL = "openai/gpt-oss-20b"
 
 DISTILL_INSTRUCTIONS = """\
@@ -49,7 +67,13 @@ the agent reading your answer cannot check your work against the original.
 """
 
 
-def make_distill_agent(provider: GroqProvider) -> Agent:
-    model = GroqModel(DISTILL_MODEL, provider=provider)
-    settings = GroqModelSettings(groq_reasoning_effort="low")
+def make_distill_agent(provider: GroqProvider, model_id: str | None = None) -> Agent:
+    is_default = model_id is None or model_id == DISTILL_MODEL
+    model = GroqModel(model_id or DISTILL_MODEL, provider=provider)
+    # The forced-low reasoning effort is a speed shortcut specific to
+    # DISTILL_MODEL — see module docstring. An override gets its own default
+    # reasoning depth instead, both because that's presumably the point of
+    # overriding at all, and because it isn't guaranteed to accept "low"
+    # (qwen/qwen3.6-27b, a real candidate, rejects it outright).
+    settings = GroqModelSettings(groq_reasoning_effort="low") if is_default else None
     return Agent(model, instructions=DISTILL_INSTRUCTIONS, model_settings=settings)

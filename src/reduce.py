@@ -27,6 +27,13 @@ to hide its three internal model calls behind one answer:
   3. reduce — one ordinary tcode turn (full capabilities, respects
      `--quiet`, can write_file if the prompt asks it to) over the
      collected map/digest output plus the caller's original prompt.
+  4. coverage check — after reduce, a cheap heuristic (`_uncovered_groups`)
+     flags any input group whose distinguishing keywords never surface in
+     the final text at all. Advisory only (a notice, not a retry): it
+     can't tell "genuinely nothing new to say" from "silently dropped,"
+     but tcode_improvements.txt's Finding 3 is a real case of the latter
+     reading exactly like the former with nothing to tell them apart —
+     this at least makes the omission visible instead of silent.
 
 A caller with a batch task looks exactly like a caller with a single-file
 task: one `tcode --reduce PATTERN "..."` invocation, one answer out.
@@ -37,9 +44,11 @@ caller's.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 from pydantic_ai import AgentRunError, UsageLimits
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai_harness import FileSystem
 
@@ -97,6 +106,76 @@ def discover_files(pattern: str, root: Path) -> list[Path]:
 def _group_key(path: Path) -> str:
     """Parent directory as the grouping signal — see module docstring."""
     return str(path.parent)
+
+
+_WORD_SPLIT = re.compile(r"[/_\-]+")
+_MIN_KEYWORD_LEN = 3
+
+
+def _group_keywords(group_keys: list[str]) -> dict[str, set[str]]:
+    """Path segments that distinguish one group's key from the others.
+
+    A segment shared by every group ("profiles", "daily", a common parent
+    directory) is structural, not identifying content, so it's subtracted
+    out before comparing against the final answer below — otherwise every
+    group would trivially "match" on words the final answer was always
+    going to contain regardless of what it actually covered.
+    """
+    seg_sets = {k: {s for s in _WORD_SPLIT.split(k.lower()) if s} for k in group_keys}
+    common = set.intersection(*seg_sets.values()) if len(seg_sets) > 1 else set()
+    return {k: (segs - common) or segs for k, segs in seg_sets.items()}
+
+
+def _last_write_content(message_history: list[ModelMessage]) -> str:
+    """The content of the most recent write_file/edit_file call, if any.
+
+    The reduce prompt explicitly asks the model to call write_file rather
+    than print the rollup as its reply text (see run_reduce's final_prompt)
+    — and a model that follows that instruction leaves a chat reply that's
+    just a short acknowledgment ("Rollup written to X"), not the rollup
+    itself. Checking coverage against `final_text` alone (see
+    `_uncovered_groups`) would then flag every entity as unmentioned
+    regardless of how completely the actual written content covers them —
+    a false positive on the exact well-behaved case the prompt asked for.
+    Pulling the real written text back out of the tool call it came from is
+    what makes the coverage check mean anything once a model does this.
+    """
+    for msg in reversed(message_history):
+        if not isinstance(msg, ModelResponse):
+            continue
+        for part in msg.parts:
+            if isinstance(part, ToolCallPart) and part.tool_name in ("write_file", "edit_file"):
+                try:
+                    args = part.args_as_dict()
+                except Exception:
+                    return ""
+                return str(args.get("content", args.get("new_text", "")))
+    return ""
+
+
+def _uncovered_groups(files: list[Path], covered_text: str) -> list[str]:
+    """Group keys whose distinguishing keywords never surface in `covered_text`.
+
+    A cheap, generic stand-in for "was every input actually used in the
+    synthesis" — see tcode_improvements.txt's Finding 3: --reduce silently
+    dropped an entire entity's document while the final answer claimed
+    outright that no other entity had anything new. This can't tell *why*
+    a group goes unmentioned (genuinely nothing new to say vs. silently
+    dropped) — it only flags the group so a human or caller can check,
+    rather than letting both cases read identically. `covered_text` should
+    be the model's reply plus whatever it actually wrote to disk (see
+    `_last_write_content`) — checking the reply alone misses everything a
+    well-behaved write_file call put only in the file.
+    """
+    keys = sorted({_group_key(f) for f in files})
+    keywords = _group_keywords(keys)
+    lowered = covered_text.lower()
+    return [
+        key
+        for key in keys
+        if (kws := [k for k in keywords[key] if len(k) >= _MIN_KEYWORD_LEN])
+        and not any(re.search(rf"\b{re.escape(k)}\b", lowered) for k in kws)
+    ]
 
 
 async def _map_one(
@@ -168,7 +247,7 @@ async def run_reduce(
 
     provider = GroqProvider(api_key=cfg.api_key)
     reader = FileSystem(root_dir=str(cfg.cwd), max_read_lines=_MAX_READ_LINES).get_toolset()
-    distill_agent = make_distill_agent(provider)
+    distill_agent = make_distill_agent(provider, cfg.distill_model)
     extraction_prompt = f"Extract everything relevant to answering this: {prompt}"
 
     map_results = await asyncio.gather(
@@ -237,4 +316,19 @@ async def run_reduce(
     )
 
     agent = build_agent(cfg)
-    return await run_turn(agent, final_prompt, message_history, usage_limits, cfg, quiet=quiet)
+    message_history, final_text = await run_turn(
+        agent, final_prompt, message_history, usage_limits, cfg, quiet=quiet
+    )
+
+    covered_text = final_text + "\n" + _last_write_content(message_history)
+    missing = _uncovered_groups(files, covered_text)
+    if missing:
+        ui.print_notice(
+            f"note: the final answer doesn't appear to mention {len(missing)} of "
+            f"{len({_group_key(f) for f in files})} input group(s) at all "
+            f"({', '.join(missing)}) — verify it didn't silently drop their "
+            "content rather than genuinely finding nothing new there.",
+            quiet=quiet,
+        )
+
+    return message_history, final_text

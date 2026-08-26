@@ -158,6 +158,8 @@ class Config:
     web_search: bool
     tavily_api_key: str | None
     write_scope: list[str]
+    check_citations: bool
+    distill_model: str | None
     rpm_state_file: Path
     groq_rpm_state_file: Path
     project_slug: str
@@ -299,6 +301,26 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     raw_write_scope = os.environ.get("TCODE_WRITE_SCOPE", "").strip()
     write_scope = [s.strip() for s in raw_write_scope.split(",") if s.strip()]
 
+    # Off by default: rejecting a write that cites a backtick-quoted,
+    # nonexistent source path is exactly right for a caller whose whole
+    # output is citations of files it was handed (a research rollup), but a
+    # generic coding session legitimately proposes paths that don't exist
+    # *yet* — a file to create next — which this can't tell apart from a
+    # fabricated citation. See guardrails.py's citation_paths_exist.
+    raw_check_citations = os.environ.get("TCODE_CHECK_CITATIONS", "").strip().lower()
+    check_citations = raw_check_citations not in ("", "0", "false", "no")
+
+    # Unset (the default) keeps distill.py's own small/cheap DISTILL_MODEL —
+    # right for most callers. A caller whose whole task is precise
+    # multi-document extraction (--reduce over many files, say, where a
+    # misread here poisons every downstream turn) can point this at
+    # something stronger; see distill.py's module docstring for why this
+    # matters more than it looks like a "just a helper model" setting would
+    # suggest. Always a bare Groq model id, never a provider:model_id
+    # spec — make_distill_agent is Groq-only by design regardless of what
+    # `provider` above is (same constraint TCODE_VERIFY_MODEL already has).
+    distill_model = os.environ.get("TCODE_DISTILL_MODEL", "").strip() or None
+
     slug = _slugify(cwd)
     project_dir = GLOBAL_DIR / "projects" / slug
     memory_dir = GLOBAL_DIR / "memory"
@@ -335,6 +357,8 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         web_search=web_search,
         tavily_api_key=tavily_api_key,
         write_scope=write_scope,
+        check_citations=check_citations,
+        distill_model=distill_model,
         rpm_state_file=rpm_state_file,
         groq_rpm_state_file=groq_rpm_state_file,
         project_slug=slug,
