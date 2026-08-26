@@ -359,12 +359,42 @@ async def run_reduce(
     covered_text = final_text + "\n" + _last_write_content(message_history)
     missing = _uncovered_groups(files, covered_text)
     if missing:
+        # Observed live: the notice alone doesn't stop the false claim it's
+        # warning about — a rollup can state "no other entity introduced new
+        # material" in the very file the notice is flagging as omitting one.
+        # One retry, same shape as _distill_with_retry's single-retry-then-
+        # give-up: ask the model to explicitly address each missing group
+        # before accepting the answer, reusing message_history so it has its
+        # own prior turn (and the already-distilled input) as context rather
+        # than re-deriving the whole prompt from scratch.
         ui.print_notice(
-            f"note: the final answer doesn't appear to mention {len(missing)} of "
+            f"note: the final answer doesn't mention {len(missing)} of "
             f"{len({_group_key(f) for f in files})} input group(s) at all "
-            f"({', '.join(missing)}) — verify it didn't silently drop their "
-            "content rather than genuinely finding nothing new there.",
+            f"({', '.join(missing)}) — asking the model to address them "
+            "explicitly before accepting this answer.",
             quiet=quiet,
         )
+        retry_prompt = (
+            "Your answer above doesn't mention " + ", ".join(missing) + " at "
+            "all. Revise it now: for each of those, either incorporate what "
+            "changed (using the material already given to you above) or "
+            "state explicitly that nothing new was found for it — don't "
+            "silently drop it. Write the corrected, complete answer the same "
+            "way you wrote the first one, including calling write_file "
+            "again if that's how you saved it the first time."
+        )
+        message_history, final_text = await run_turn(
+            agent, retry_prompt, message_history, usage_limits, cfg, quiet=quiet
+        )
+        covered_text = final_text + "\n" + _last_write_content(message_history)
+        still_missing = _uncovered_groups(files, covered_text)
+        if still_missing:
+            ui.print_notice(
+                f"note: after one retry, the answer still doesn't mention "
+                f"{len(still_missing)} group(s) ({', '.join(still_missing)}) "
+                "— giving up on forcing coverage; treat this answer as "
+                "potentially incomplete.",
+                quiet=quiet,
+            )
 
     return message_history, final_text
