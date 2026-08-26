@@ -40,6 +40,7 @@ TCODE_WEB_SEARCH=1                 # optional, web search/fetch tools (default o
 TAVILY_API_KEY=tvly-...            # optional, better web search — see "Web search" below
 TCODE_CHECK_CITATIONS=1            # optional, reject a write citing a source file that doesn't exist (default off)
 TCODE_DISTILL_MODEL=openai/gpt-oss-120b  # optional, a stronger Groq model for the internal distillation pass (default gpt-oss-20b)
+TCODE_REQUIRE_CITATION_FOR="[CONFIRMED],[MEASURED]"  # optional, reject a write using one of these tags with no citation on that line
 ```
 
 Get a key at <https://console.groq.com/keys>. Real environment variables
@@ -137,6 +138,13 @@ report that cites source files it read this run (a research rollup, say):
   path (`` `profiles/bessent/daily/2026-08-23.md` ``) that doesn't
   actually exist under the workspace is rejected the same way — catches a
   model inventing a plausible-sounding source it never actually read.
+- `TCODE_REQUIRE_CITATION_FOR="[TAG1],[TAG2]"` (opt-in, no built-in
+  vocabulary of its own): for a caller whose own prompt defines confidence
+  tags and asks the model to use them, any write where a configured tag
+  appears on a line with no URL or cited file path anywhere on that same
+  line is rejected — catches a model stating a fabricated fact under its
+  own highest-confidence label with nothing backing it up at all, not just
+  a wrong or mangled citation the two checks above already catch.
 
 The prompt can come via stdin instead of an argument too (`echo "..." |
 tcode`, or a subprocess `input=` from another language) — useful once the

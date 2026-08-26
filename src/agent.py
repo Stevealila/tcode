@@ -58,6 +58,7 @@ from .guardrails import (
     WRITE_TOOLS,
     UrlLedger,
     citation_paths_exist,
+    confidence_tags_need_citation,
     scope_shell_exploration,
     scope_writes_to,
 )
@@ -323,6 +324,11 @@ def build_agent(cfg: Config) -> Agent:
         *(
             [ToolGuardrail(guard=citation_paths_exist(workspace), tools=WRITE_TOOLS)]
             if cfg.check_citations
+            else []
+        ),
+        *(
+            [ToolGuardrail(guard=confidence_tags_need_citation(cfg.require_citation_for), tools=WRITE_TOOLS)]
+            if cfg.require_citation_for
             else []
         ),
         # Tuned for Groq's tokens-per-minute budget rather than a generic

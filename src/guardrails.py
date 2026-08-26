@@ -39,6 +39,16 @@ technical teeth:
   like the others here: a generic coding session legitimately proposes
   paths that don't exist *yet* (a file to create next), which this can't
   tell apart from a fabricated citation.
+- `confidence_tags_need_citation` rejects a write where a caller-configured
+  confidence tag (e.g. `[CONFIRMED]`) appears on a line with no URL or
+  cited file path anywhere on it — tcode_improvements.txt's Finding 10:
+  a model stating a fabricated number or an invented source under its own
+  highest-confidence label, with no citation at all (not a fake path, not
+  a mangled URL — the two guards above catch a *wrong* citation, not a
+  *missing* one). Opt-in (`TCODE_REQUIRE_CITATION_FOR`, a caller-supplied
+  tag list) rather than hardcoding one caller's own tagging vocabulary —
+  most tcode tasks don't tag confidence at all, so this only exists once a
+  caller's own prompt asks for and defines that convention.
 """
 
 from __future__ import annotations
@@ -244,6 +254,44 @@ def citation_paths_exist(workspace: str | Path):
             f"this workspace: {', '.join(missing)}. Only cite a file you "
             "actually read this run — remove the citation or fix the path "
             "instead of leaving a reference to something that isn't there."
+        )
+
+    return guard
+
+
+def confidence_tags_need_citation(tags: Sequence[str]):
+    """Build a guard rejecting a write where any of `tags` appears on a
+    line with no URL or cited file path anywhere on that same line.
+
+    `tags` are literal strings a caller's own prompt defines and asks the
+    model to use (e.g. `["[CONFIRMED]"]`) — this has no built-in vocabulary
+    of its own, so an empty/unset `tags` (the default, via
+    TCODE_REQUIRE_CITATION_FOR) makes the returned guard a no-op rather
+    than matching every write. Proximity is deliberately just "the same
+    line": every real example of this failure (tcode_improvements.txt's
+    Finding 10) was a whole bullet or sentence carrying the tag with no
+    source anywhere in it, not a citation placed elsewhere in the
+    paragraph — a wider search window could credit a tag with a citation
+    that's actually backing up a different claim nearby.
+    """
+    escaped = [re.escape(t) for t in tags if t.strip()]
+    if not escaped:
+        return lambda call: GuardrailResult.allow()
+    tag_pattern = re.compile("|".join(escaped))
+
+    def guard(call: ToolCallInfo) -> GuardrailResult:
+        bad_lines = [
+            line.strip()[:120]
+            for line in _write_text(call).splitlines()
+            if tag_pattern.search(line) and not _URL_IN_TEXT.search(line) and not _CITED_PATH.search(line)
+        ]
+        if not bad_lines:
+            return GuardrailResult.allow()
+        return GuardrailResult.retry(
+            f"This content uses a confidence tag ({', '.join(tags)}) on a "
+            f"line with no URL or cited file path backing it up: "
+            f"{'; '.join(bad_lines)}. Add a real source on that line, or "
+            "use a lower-confidence tag if you don't actually have one."
         )
 
     return guard

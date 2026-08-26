@@ -159,6 +159,7 @@ class Config:
     tavily_api_key: str | None
     write_scope: list[str]
     check_citations: bool
+    require_citation_for: list[str]
     distill_model: str | None
     rpm_state_file: Path
     groq_rpm_state_file: Path
@@ -310,6 +311,15 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     raw_check_citations = os.environ.get("TCODE_CHECK_CITATIONS", "").strip().lower()
     check_citations = raw_check_citations not in ("", "0", "false", "no")
 
+    # Unset (the default) means no confidence-tag vocabulary at all, so the
+    # guard it wires up is a no-op — most tcode tasks don't tag confidence
+    # levels in their output. A caller whose own prompt defines tags like
+    # [CONFIRMED]/[MEASURED] and asks the model to use them sets this to
+    # require each one carry a real citation on the same line, or the write
+    # is rejected. See guardrails.py's confidence_tags_need_citation.
+    raw_require_citation_for = os.environ.get("TCODE_REQUIRE_CITATION_FOR", "").strip()
+    require_citation_for = [t.strip() for t in raw_require_citation_for.split(",") if t.strip()]
+
     # Unset (the default) keeps distill.py's own small/cheap DISTILL_MODEL —
     # right for most callers. A caller whose whole task is precise
     # multi-document extraction (--reduce over many files, say, where a
@@ -358,6 +368,7 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         tavily_api_key=tavily_api_key,
         write_scope=write_scope,
         check_citations=check_citations,
+        require_citation_for=require_citation_for,
         distill_model=distill_model,
         rpm_state_file=rpm_state_file,
         groq_rpm_state_file=groq_rpm_state_file,
