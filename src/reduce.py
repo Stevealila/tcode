@@ -47,7 +47,7 @@ import asyncio
 import re
 from pathlib import Path
 
-from pydantic_ai import AgentRunError, UsageLimits
+from pydantic_ai import AgentRunError, ModelHTTPError, UsageLimits
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai_harness import FileSystem
@@ -69,6 +69,15 @@ _MAX_READ_LINES = 20_000
 # prompt, or a later digest pass) when its own distillation call fails —
 # see _map_one/_digest_group below.
 _NO_SIGNAL = "no signal extracted (distillation call failed)"
+
+# A single unconditional wait before retrying a distillation call that hit
+# a 429 — see _distill_with_retry. Real Groq TPM 429s observed in
+# production (TCODE_DISTILL_MODEL pointed at the same model already doing
+# double duty as the primary/fallback reduce turn, so both drew on one
+# shared per-model token budget) named a suggested wait of well under this,
+# typically 1-3s — the per-minute window clears fast, so a short blind
+# pause recovers the call far more often than it doesn't.
+_RATE_LIMIT_RETRY_DELAY = 3.0
 
 
 def discover_files(pattern: str, root: Path) -> list[Path]:
@@ -178,6 +187,33 @@ def _uncovered_groups(files: list[Path], covered_text: str) -> list[str]:
     ]
 
 
+async def _distill_with_retry(distill_agent, cfg: Config, prompt: str) -> str:
+    """Run one distill_agent call, absorbing a single transient 429 with a
+    short wait before retrying once — see _RATE_LIMIT_RETRY_DELAY. Blind
+    (no parsing of the provider's own retry-after text, a message format
+    Groq doesn't guarantee stays stable) but effective in practice: this
+    is the one failure shape that's genuinely worth retrying, unlike a
+    hallucinated tool call or a structured-output rejection the same call
+    would just reproduce.
+
+    Raises whatever the second attempt raises (or the first, for anything
+    that isn't a 429) — the caller's own AgentRunError handling is
+    unchanged for every other failure shape.
+    """
+    try:
+        distilled = await distill_agent.run(prompt)
+        return str(distilled.output)
+    except ModelHTTPError as e:
+        if e.status_code != 429:
+            raise
+        await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+        # Same shared cross-process throttle as the call this is retrying —
+        # this is a second Groq request the main loop doesn't know about.
+        await throttle(cfg.groq_rpm_state_file, cfg.groq_max_rpm)
+        distilled = await distill_agent.run(prompt)
+        return str(distilled.output)
+
+
 async def _map_one(
     reader, distill_agent, cfg: Config, path: Path, extraction_prompt: str, *, quiet: bool
 ) -> tuple[str, str]:
@@ -187,10 +223,10 @@ async def _map_one(
     # Groq's own budget specifically, not cfg's active-provider one.
     await throttle(cfg.groq_rpm_state_file, cfg.groq_max_rpm)
     try:
-        distilled = await distill_agent.run(
-            f"QUESTION: {extraction_prompt}\n\nFILE: {path}\n\n--- FILE CONTENT ---\n{raw}"
+        text = await _distill_with_retry(
+            distill_agent, cfg, f"QUESTION: {extraction_prompt}\n\nFILE: {path}\n\n--- FILE CONTENT ---\n{raw}"
         )
-        return str(path), str(distilled.output)
+        return str(path), text
     except AgentRunError as e:
         # distill_agent sits at pydantic_ai's default retry budget (1) and
         # has no tools of its own, so this is either a hallucinated tool
@@ -222,10 +258,10 @@ async def _digest_group(
     # Groq's own budget specifically, not cfg's active-provider one.
     await throttle(cfg.groq_rpm_state_file, cfg.groq_max_rpm)
     try:
-        distilled = await distill_agent.run(
-            f"QUESTION: {prompt}\n\nGROUP: {label}\n\n--- COMBINED CONTENT ---\n{combined}"
+        text = await _distill_with_retry(
+            distill_agent, cfg, f"QUESTION: {prompt}\n\nGROUP: {label}\n\n--- COMBINED CONTENT ---\n{combined}"
         )
-        return label, str(distilled.output)
+        return label, text
     except AgentRunError as e:
         # Same reasoning as _map_one's — see its comment for why this is
         # AgentRunError, not just UnexpectedModelBehavior.
