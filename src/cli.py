@@ -14,10 +14,12 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from pydantic_ai import ModelHTTPError, UsageLimits
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai_harness.guardrails import ToolCallInfo
 
 from . import ui
 from .agent import build_agent
 from .config import Config, ConfigError, load_config
+from .guardrails import citation_paths_exist, confidence_tags_need_citation
 from .runner import run_turn
 from .sessions import list_sessions, load_latest_session, save_session
 
@@ -152,8 +154,74 @@ def _extract_leaked_write_payload(text: str) -> tuple[str | None, bool]:
     return _unescape_json_string_prefix(raw), True
 
 
+_WRITE_CONFIRMATION_ONLY = re.compile(r"\b(?:written|saved|created)\b(?:\s+\S+){0,6}?\s+\b(?:to|as|in)\b", re.IGNORECASE)
+_CONFIRMATION_ONLY_MAX_CHARS = 400
+
+
+def _looks_like_write_confirmation_only(text: str, write_path: Path) -> bool:
+    """True if `text` is just a short "I wrote/saved this" status line
+    about `write_path` itself, not the actual content the caller asked for.
+
+    Observed live: a --reduce turn whose real write_file/edit_file call
+    failed after most of its inputs had already degraded left a one-line
+    chat reply — "The rollup has been written to `.../rollup.md`." — and
+    the write fallback (before this check existed) saved that sentence as
+    the entire file: 88 bytes, one line, rc=0, mtime changed. Nothing
+    about a calling script's own "did the file change" success check could
+    tell the difference from a real answer.
+
+    Deliberately narrow (short text AND mentions the write path's own name
+    AND a completion verb) rather than a bare length cutoff: a genuinely
+    terse real answer ("Nothing new this window.") is a correct, intended
+    shape for some callers and must not be rejected just for being short.
+    """
+    stripped = text.strip()
+    if len(stripped) > _CONFIRMATION_ONLY_MAX_CHARS:
+        return False
+    mentions_path = write_path.name in stripped or write_path.stem in stripped
+    return mentions_path and bool(_WRITE_CONFIRMATION_ONLY.search(stripped))
+
+
+def _write_guardrail_rejection(cfg: Config, write_path: Path, content: str) -> str | None:
+    """Replay the same content-quality guards a real write_file/edit_file
+    call would face, against text --write's fallback is about to save
+    directly to disk instead. Returns the rejection message if any
+    configured guard would reject `content`, else None.
+
+    _apply_write_fallback exists precisely because the model's own
+    write_file/edit_file call didn't happen — which also means this text
+    never passed through the ToolGuardrails (citation_paths_exist,
+    confidence_tags_need_citation) wired onto those tools in agent.py.
+    Observed live: a write_file call correctly REJECTED TWICE by
+    confidence_tags_need_citation for an uncited [CONFIRMED] claim: the
+    model gave up rather than fixing it, and the *identical* uncited claim
+    in its final chat reply got saved anyway by the fallback, because that
+    path writes straight to the filesystem and was never routed through
+    either guard. The guard did its job twice; the fallback undid it once.
+
+    Only the stateless, config-driven guards are replayable here —
+    UrlLedger's URL-truncation check needs the actual run's own record of
+    which URLs a tool result returned, which isn't available after the
+    fact from just the final text. citation_paths_exist and
+    confidence_tags_need_citation cover the two failure shapes actually
+    observed; a future pass could thread UrlLedger's own state through if
+    a URL-truncation bypass is ever seen here too.
+    """
+    call = ToolCallInfo(name="write_file", args={"path": str(write_path), "content": content}, tool_call_id="write-fallback")
+    guards = []
+    if cfg.check_citations:
+        guards.append(citation_paths_exist(cfg.cwd))
+    if cfg.require_citation_for:
+        guards.append(confidence_tags_need_citation(cfg.require_citation_for))
+    for guard in guards:
+        result = guard(call)
+        if result.action != "allow":
+            return result.message or "rejected by a configured write guard"
+    return None
+
+
 def _apply_write_fallback(
-    write_path: Path | None, before_mtime: float | None, final_text: str, *, quiet: bool
+    cfg: Config, write_path: Path | None, before_mtime: float | None, final_text: str, *, quiet: bool
 ) -> None:
     """A Python-level safety net for --write, see build_parser()'s help text.
 
@@ -163,6 +231,19 @@ def _apply_write_fallback(
     story_intake.sh/state_of_market.sh already had to write themselves in
     bash before this existed — moved here once so no caller has to
     reimplement it.
+
+    Three checks gate the actual write, in order: is this leaked tool-call
+    syntax rather than an answer (recoverable via
+    _extract_leaked_write_payload, or refused if not); is it just a short
+    confirmation that a write happened rather than real content
+    (_looks_like_write_confirmation_only); would a configured content
+    guard reject it if it had gone through write_file for real
+    (_write_guardrail_rejection). All three were added after being
+    observed live, not designed in the abstract — this function's whole
+    reason to exist (salvage a real answer the model's own tool call
+    failed to save) was itself becoming a way to bypass every guard above
+    it, since a raw `write_path.write_text(...)` never touches the
+    ToolGuardrail machinery those guards are wired onto.
     """
     if write_path is None:
         return
@@ -170,61 +251,77 @@ def _apply_write_fallback(
         return
     if not final_text.strip():
         return
+
+    candidate = final_text
+    from_leak = False
+    truncated = False
     if _looks_like_leaked_tool_call(final_text):
-        # Not automatically unsalvageable: the leaked JSON/pseudo-XML is
-        # usually the model's own genuine write_file/edit_file call, just
-        # never turned into a real one — its `content`/`new_text` argument
-        # is often a perfectly good answer sitting right there. Recover it
-        # if we can; only fall through to refusing the write (below) when
-        # nothing recoverable is found at all. Writing the RAW leaked text
-        # verbatim would still be worse than writing nothing (see the
-        # comment on that path) — the difference here is trying to salvage
-        # the payload first instead of jumping straight to refusal.
-        salvaged, truncated = _extract_leaked_write_payload(final_text)
-        if salvaged is not None:
-            if truncated:
-                salvaged += (
-                    "\n\n[tcode: recovered from a leaked, incomplete tool "
-                    "call — the model's own generation was cut off "
-                    "partway through, so this stops mid-sentence/"
-                    "mid-section. Treat it as a partial answer, not a "
-                    "finished one.]"
-                )
-            write_path.parent.mkdir(parents=True, exist_ok=True)
-            write_path.write_text(salvaged)
+        from_leak = True
+        recovered, truncated = _extract_leaked_write_payload(final_text)
+        if recovered is None:
+            # Writing this would be worse than writing nothing: it dresses
+            # up as a successful save (file now exists, mtime changed, a
+            # reassuring notice) while the content is the model's own
+            # unexecuted tool call, not an answer. See
+            # _looks_like_leaked_tool_call's docstring for where this was
+            # observed.
             ui.print_notice(
-                f"--write: the model's own write didn't land this turn, "
-                f"and its final answer looked like a leaked, unexecuted "
-                f"tool call — recovered the "
-                f"{'truncated ' if truncated else ''}content from inside "
-                f"it and wrote that to {write_path} instead of leaving it "
-                "empty.",
+                f"--write: the model's final answer looks like its own "
+                f"unexecuted tool call, not a real answer — leaving {write_path} "
+                "untouched instead of saving it.",
                 quiet=quiet,
             )
             return
-        # Writing this would be worse than writing nothing: it dresses up
-        # as a successful save (file now exists, mtime changed, a
-        # reassuring notice) while the content is the model's own
-        # unexecuted tool call, not an answer. A caller whose retry logic
-        # is exactly "did the file change" (the callers this fallback
-        # exists for) would take that as success and never retry — see
-        # _looks_like_leaked_tool_call's docstring for where this was
-        # observed. Leaving the file untouched keeps this turn looking like
-        # what it was: nothing usable produced, same as an empty answer.
+        candidate = recovered
+
+    if _looks_like_write_confirmation_only(candidate, write_path):
         ui.print_notice(
-            f"--write: the model's final answer looks like its own "
-            f"unexecuted tool call, not a real answer — leaving {write_path} "
-            "untouched instead of saving it.",
+            f"--write: the model's final answer is just a short "
+            f"confirmation that it wrote {write_path.name} "
+            f"({candidate.strip()!r}), not the actual content — leaving "
+            f"{write_path} untouched instead of saving a one-line "
+            "stand-in for a real answer.",
             quiet=quiet,
         )
         return
+
+    rejection = _write_guardrail_rejection(cfg, write_path, candidate)
+    if rejection is not None:
+        ui.print_notice(
+            f"--write: this content would be rejected by a configured "
+            f"write guard ({rejection}) — leaving {write_path} untouched "
+            "rather than saving content that failed the same check a "
+            "real write_file call would have had to pass.",
+            quiet=quiet,
+        )
+        return
+
+    if truncated:
+        candidate += (
+            "\n\n[tcode: recovered from a leaked, incomplete tool call — "
+            "the model's own generation was cut off partway through, so "
+            "this stops mid-sentence/mid-section. Treat it as a partial "
+            "answer, not a finished one.]"
+        )
+
     write_path.parent.mkdir(parents=True, exist_ok=True)
-    write_path.write_text(final_text)
-    ui.print_notice(
-        f"--write: the model's own write didn't land this turn — wrote its "
-        f"answer to {write_path} directly",
-        quiet=quiet,
-    )
+    write_path.write_text(candidate)
+    if from_leak:
+        ui.print_notice(
+            f"--write: the model's own write didn't land this turn, "
+            f"and its final answer looked like a leaked, unexecuted "
+            f"tool call — recovered the "
+            f"{'truncated ' if truncated else ''}content from inside "
+            f"it and wrote that to {write_path} instead of leaving it "
+            "empty.",
+            quiet=quiet,
+        )
+    else:
+        ui.print_notice(
+            f"--write: the model's own write didn't land this turn — wrote its "
+            f"answer to {write_path} directly",
+            quiet=quiet,
+        )
 
 
 def _friendly_error(e: Exception) -> str:
@@ -322,7 +419,7 @@ async def one_shot(
     except Exception as e:  # noqa: BLE001
         ui.print_error(_friendly_error(e))
         raise SystemExit(1) from e
-    _apply_write_fallback(write_path, before_mtime, final_text, quiet=quiet)
+    _apply_write_fallback(cfg, write_path, before_mtime, final_text, quiet=quiet)
     save_session(cfg, message_history)
 
 
@@ -413,7 +510,7 @@ async def reduce_mode(
     except Exception as e:  # noqa: BLE001
         ui.print_error(_friendly_error(e))
         raise SystemExit(1) from e
-    _apply_write_fallback(write_path, before_mtime, final_text, quiet=quiet)
+    _apply_write_fallback(cfg, write_path, before_mtime, final_text, quiet=quiet)
     save_session(cfg, message_history)
 
 
