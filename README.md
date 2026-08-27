@@ -121,6 +121,13 @@ Slash commands inside an interactive session:
 - `/clear` — clear the in-memory conversation (keeps the saved session file until you send another message)
 - `/memory` — show what's currently in the global memory notebook
 - `/sessions` — list saved sessions for this project
+- `/model` — show the current model and the Groq catalogue (live, with a
+  static fallback when offline); `/model <id>` switches for the rest of the
+  session — fuzzy match ok (`/model 120b`, `/model mini`), or
+  `/model google:<id>` / `/model zai:<id>` for another backend. Session-only;
+  `--model` / `GROQ_MODEL` still set the startup default. A rejected switch
+  (banned model, missing provider key, missing extra) leaves the session on
+  its current model.
 - `/skills` — list skills found in `~/.tcode/skills`
 - `/skill <name>` — load `~/.tcode/skills/<name>.md`; its content is
   prepended to your *next* message, not sent immediately — write reusable
@@ -480,6 +487,7 @@ for a plain one-shot call, not just `--reduce`.
 Everything is one file each in `src/`:
 
 - `config.py` — `.env` loading, on-disk layout
+- `models.py` — the Groq model catalogue lookup behind `/model`
 - `agent.py` — which harness capabilities are wired in
 - `web.py` — the web search/fetch tools (see "Web search" above)
 - `files.py` / `distill.py` — the large-file distillation tool and its

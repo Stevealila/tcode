@@ -73,6 +73,7 @@ _HELP_ROWS = [
     ("/clear", "clear the conversation in this session"),
     ("/memory", "show the global memory notebook"),
     ("/sessions", "list saved sessions for this project"),
+    ("/model [id]", "show or switch the model for this session (fuzzy match ok)"),
     ("/skills", "list skills in ~/.tcode/skills"),
     ("/skill <name>", "load a skill, added to your next message"),
     ("/exit", "leave (also: /quit, Ctrl-D)"),
@@ -359,6 +360,25 @@ def show_sessions(paths: list[Path]) -> None:
         return
     for p in paths:
         console.print(f"  [{ACCENT}]{escape(p.stem)}[/{ACCENT}]")
+
+
+def show_models(cfg: Config, catalogue: list[str], error: str | None = None) -> None:
+    current = f"{cfg.provider}:{cfg.model}" if cfg.provider != "groq" else cfg.model
+    effort = f"  [dim](effort: {cfg.effort})[/dim]" if cfg.effort else ""
+    console.print(f"[bold]model[/bold]  [{ACCENT}]{escape(current)}[/{ACCENT}]{effort}")
+    if error:
+        console.print(
+            f"[dim]couldn't reach Groq's model list ({escape(error)}) — "
+            "showing the last-known set[/dim]"
+        )
+    console.print("[dim]available on Groq:[/dim]")
+    for m in catalogue:
+        on = cfg.provider == "groq" and m == cfg.model
+        mark = f"[{ACCENT}]●[/{ACCENT}]" if on else " "
+        console.print(f"  {mark} {escape(m)}")
+    console.print("[dim]switch:  /model <id>  — fuzzy match ok (e.g. /model 20b)[/dim]")
+    console.print("[dim]other backends:  /model google:<id>  ·  /model zai:<id>[/dim]")
+    console.print()
 
 
 def show_skills(names: list[str]) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import datetime as _dt
 import json
 import os
@@ -20,7 +21,8 @@ from pydantic_ai_harness.guardrails import ToolCallInfo
 
 from . import ui
 from .agent import build_agent
-from .config import Config, ConfigError, load_config
+from .config import _PROVIDER_API_KEY_ENV, Config, ConfigError, _rpm_for, load_config
+from .config import parse_model_spec as _parse_model_spec
 from .guardrails import citation_paths_exist, confidence_tags_need_citation
 from .runner import run_turn
 from .sessions import list_sessions, load_archive, load_latest_session, save_session
@@ -356,6 +358,81 @@ def _friendly_error(e: Exception) -> str:
     return str(e)
 
 
+def _model_command(cfg: Config, agent: object, arg: str) -> object:
+    """Handle `/model [id]` in the REPL.
+
+    Returns the agent to use for subsequent turns — a freshly built one on a
+    successful switch, otherwise the current one, unchanged. Never raises:
+    every failure prints a notice and leaves the session on its current
+    model. A switch is session-only; `--model` / `GROQ_MODEL` still set the
+    startup default.
+    """
+    from .models import list_groq_models, resolve_model_choice
+
+    catalogue, cat_err = list_groq_models(cfg.api_key)
+
+    if not arg:
+        ui.show_models(cfg, catalogue, cat_err)
+        return agent
+
+    chosen, candidates = resolve_model_choice(arg, catalogue)
+    if chosen is None:
+        if candidates:
+            ui.print_notice(f"{arg!r} is ambiguous — matches: {', '.join(candidates)}")
+        else:
+            ui.print_notice(
+                f"no model matching {arg!r}. Run /model to see the list, or give the "
+                "full id (org/name, or provider:id) to force one that isn't listed."
+            )
+        return agent
+
+    try:
+        provider, model_id = _parse_model_spec(chosen, source="/model")
+    except ConfigError as e:
+        ui.print_error(str(e))
+        return agent
+
+    if provider == "groq":
+        provider_api_key = cfg.api_key
+    else:
+        key_env = _PROVIDER_API_KEY_ENV[provider]
+        provider_api_key = os.environ.get(key_env, "").strip()
+        if not provider_api_key:
+            ui.print_error(
+                f"{provider}:{model_id} needs {key_env}, which is not set in this environment."
+            )
+            return agent
+
+    if (provider, model_id) == (cfg.provider, cfg.model):
+        ui.print_notice(f"already using {chosen}")
+        return agent
+
+    max_rpm, rpm_state_file = _rpm_for(provider)
+    trial = dataclasses.replace(
+        cfg,
+        provider=provider,
+        model=model_id,
+        provider_api_key=provider_api_key,
+        max_rpm=max_rpm,
+        rpm_state_file=rpm_state_file,
+    )
+    try:
+        new_agent = build_agent(trial)
+    except Exception as e:  # noqa: BLE001 - a bad switch must not kill the REPL
+        ui.print_error(f"couldn't switch to {chosen}: {_friendly_error(e)}")
+        return agent
+
+    # Commit: mutate the live cfg in place so the banner, runner throttle and
+    # any later /model all see the new model.
+    cfg.provider, cfg.model, cfg.provider_api_key = provider, model_id, provider_api_key
+    cfg.max_rpm, cfg.rpm_state_file = max_rpm, rpm_state_file
+    label = f"{provider}:{model_id}" if provider != "groq" else model_id
+    ui.print_notice(f"model → {label}")
+    if cfg.effort and provider != "groq":
+        ui.print_notice(f"note: --effort {cfg.effort} has no effect on {provider} models")
+    return new_agent
+
+
 _INIT_PROMPT = """\
 Create a file named TCODE.md in the current directory: the project's
 instruction file for a coding agent (tcode's equivalent of CLAUDE.md /
@@ -422,6 +499,9 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
             continue
         if user_input == "/sessions":
             ui.show_sessions(list_sessions(cfg))
+            continue
+        if user_input in ("/model", "/models") or user_input.startswith("/model "):
+            agent = _model_command(cfg, agent, user_input.partition(" ")[2].strip())
             continue
         if user_input in ("/skill", "/skills") or user_input.startswith("/skill "):
             name = user_input.partition(" ")[2].strip()
