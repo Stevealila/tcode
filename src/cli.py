@@ -13,6 +13,7 @@ from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.styles import Style
 from pydantic_ai import ModelHTTPError, UsageLimits
 from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 from pydantic_ai_harness.guardrails import ToolCallInfo
@@ -386,8 +387,11 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
     ui.print_banner(cfg)
 
+    # Claude Code's coral `>` caret.
+    prompt_style = Style.from_dict({"prompt": f"{ui.ACCENT} bold"})
+    prompt_message = [("class:prompt", "> ")]
     prompt_session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(cfg.history_file))
+        history=FileHistory(str(cfg.history_file)), style=prompt_style
     )
     # Set by /skill <name>, consumed by the next real prompt (see below) —
     # a human explicitly loading a skill for their own next message, not
@@ -396,7 +400,7 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
 
     while True:
         try:
-            user_input = await prompt_session.prompt_async("you › ")
+            user_input = await prompt_session.prompt_async(prompt_message)
         except (EOFError, KeyboardInterrupt):
             break
 

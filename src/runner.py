@@ -107,6 +107,10 @@ async def run_turn(
     live and then "unprinting" it isn't possible.
     """
     quiet = quiet or capture
+    # Render the answer as live Markdown only for an interactive terminal
+    # user. Piped/redirected output (not a tty) and every scripted path
+    # (--quiet, capture) keep getting raw text, or nothing, as before.
+    render_md = not quiet and ui.console.is_terminal
     start = time.monotonic()
 
     attempt = 0
@@ -115,6 +119,11 @@ async def run_turn(
     tool_names: Counter[str] = Counter()
     outcome = "ok"
     error: str | None = None
+    # Held across the retry loop so a `finally` can always stop a live
+    # Markdown render — most importantly on a KeyboardInterrupt, which is a
+    # BaseException the `except` handlers below never see, and which would
+    # otherwise leave Rich's Live thread running and the cursor hidden.
+    md_stream: ui.MarkdownStream | None = None
 
     def _finalize() -> None:
         """Render the usage footer and write the smell record — exactly
@@ -134,6 +143,7 @@ async def run_turn(
         streaming_text = False
         final_text_parts = []
         tool_names = Counter()
+        md_stream = ui.MarkdownStream() if render_md else None
 
         try:
             async with agent.iter(
@@ -159,14 +169,21 @@ async def run_turn(
                                 ):
                                     text = event.delta.content_delta
                                 if text:
+                                    first_chunk = not streaming_text
                                     streaming_text = True
                                     final_text_parts.append(text)
-                                    if not capture:
+                                    if md_stream is not None:
+                                        md_stream.feed(text)
+                                    elif not capture:
+                                        if first_chunk and not quiet:
+                                            ui.begin_assistant_message()
                                         sys.stdout.write(text)
                                         sys.stdout.flush()
                     elif Agent.is_call_tools_node(node):
                         if streaming_text:
-                            if not capture:
+                            if md_stream is not None:
+                                md_stream.close()
+                            elif not capture:
                                 sys.stdout.write("\n")
                                 sys.stdout.flush()
                             streaming_text = False
@@ -193,9 +210,13 @@ async def run_turn(
                                     else:
                                         ui.render_tool_result(event.part.tool_name, content, is_error, quiet=quiet)
 
-                if streaming_text and not capture:
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                if streaming_text:
+                    if md_stream is not None:
+                        md_stream.close()
+                    elif not capture:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                    streaming_text = False
 
                 result = run.result
 
@@ -235,6 +256,8 @@ async def run_turn(
             # the model gets a real chance at the call. Salvage whatever
             # text it already produced rather than losing a complete answer
             # to a last-step formatting failure.
+            if md_stream is not None:
+                md_stream.close()
             final_text = "".join(final_text_parts)
             if final_text.strip():
                 outcome = "salvaged_after_tool_failure"
@@ -261,6 +284,8 @@ async def run_turn(
                 quiet=quiet,
             )
         except Exception as e:  # noqa: BLE001
+            if md_stream is not None:
+                md_stream.close()
             # Any other failure exiting the turn — most importantly
             # UsageLimitExceeded (the model looped until it hit
             # request_limit), but also a raw provider error. Previously
@@ -272,6 +297,13 @@ async def run_turn(
             error = f"{type(e).__name__}: {e}"
             _finalize()
             raise
+        finally:
+            # Safety net for KeyboardInterrupt (a BaseException the handlers
+            # above never catch): stop the Live render so the cursor comes
+            # back and the thread ends. Idempotent — a no-op on every path
+            # that already closed it.
+            if md_stream is not None:
+                md_stream.close()
 
     _finalize()
 
