@@ -38,17 +38,22 @@ likely close; Windows will probably need work.
 
 ### Quick start
 
+**1. Install the `tcode` command onto your `PATH`:**
+
 ```bash
-# 1. install the `tcode` command onto your PATH
 uv tool install git+https://github.com/Stevealila/tcode.git
+```
 
-# 2. give it your Groq API key (get one at https://console.groq.com/keys)
-mkdir -p ~/.tcode
-printf 'GROQ_API_KEY=gsk_your_key_here\n' >> ~/.tcode/.env
+**2. Give it your Groq API key** (get one at <https://console.groq.com/keys>):
 
-# 3. run it from any project directory
-cd ~/some/project
-tcode
+```bash
+mkdir -p ~/.tcode && printf 'GROQ_API_KEY=gsk_your_key_here\n' >> ~/.tcode/.env
+```
+
+**3. Run it from any project directory:**
+
+```bash
+cd ~/some/project && tcode
 ```
 
 That is the whole setup. Notes:
