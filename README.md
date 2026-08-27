@@ -41,6 +41,7 @@ TAVILY_API_KEY=tvly-...            # optional, better web search — see "Web se
 TCODE_CHECK_CITATIONS=1            # optional, reject a write citing a source file that doesn't exist (default off)
 TCODE_DISTILL_MODEL=openai/gpt-oss-120b  # optional, a stronger Groq model for the internal distillation pass (default gpt-oss-20b)
 TCODE_REQUIRE_CITATION_FOR="[CONFIRMED],[MEASURED]"  # optional, reject a write using one of these tags with no citation on that line
+TCODE_EXPERT_MODEL=google:gemini-2.5-pro  # optional, a stronger model the agent can delegate one hard sub-problem to — see "Escalating to a stronger model" below
 ```
 
 Get a key at <https://console.groq.com/keys>. Real environment variables
@@ -75,6 +76,19 @@ provider under `~/.tcode/`, and `TCODE_MAX_RPM` still overrides Groq's
 specifically. Adding another provider is a small, self-contained change —
 see `_build_model` in `src/agent.py`.
 
+### Escalating to a stronger model
+
+Set `TCODE_EXPERT_MODEL` (same `provider:model_id` format as `--model`) to
+give the agent a second, stronger model it can reach for mid-run without
+switching the whole session over to it. This adds an optional `model`
+argument to its existing `delegate_task` tool — normally every delegated
+sub-task runs on that sub-agent's own default model, but with
+`TCODE_EXPERT_MODEL` set, the agent can pass `model='expert'` to route one
+specific delegation (a genuinely hard sub-problem, not routine exploration)
+to it instead, at a higher reasoning effort. Unset (the default), the
+`model` argument doesn't exist at all and every delegation behaves exactly
+as before — this is opt-in, not a second model client running by default.
+
 ## Use
 
 ```bash
@@ -93,6 +107,10 @@ Slash commands inside an interactive session:
 - `/clear` — clear the in-memory conversation (keeps the saved session file until you send another message)
 - `/memory` — show what's currently in the global memory notebook
 - `/sessions` — list saved sessions for this project
+- `/skills` — list skills found in `~/.tcode/skills`
+- `/skill <name>` — load `~/.tcode/skills/<name>.md`; its content is
+  prepended to your *next* message, not sent immediately — write reusable
+  prompt snippets there once and pull one in whenever it's relevant
 - `/exit`, `/quit` — leave (Ctrl-D also works)
 
 ## Scripted / non-interactive use
@@ -208,6 +226,13 @@ you've given it), so that carries into every project. Conversation history
 and step logs are per-project, so switching directories switches context
 the way switching repos should.
 
+Separately, tcode also auto-loads `CLAUDE.md`/`AGENTS.md` files as static
+instructions: it scans from the directory you launched `tcode` from up
+through your home directory, so a monorepo-root file is picked up even when
+you run `tcode` from a subdirectory. When more than one is found, precedence
+is ancestor-first, workspace-last — a `CLAUDE.md` in the directory you're
+actually working in wins on conflict over one further up the tree.
+
 ## Shell access
 
 By default the agent's shell is unrestricted except for a short denylist of
@@ -229,6 +254,20 @@ still leaves a shell for a prompt-injected page to try to abuse. Set
 `TCODE_SHELL=0` to omit the Shell capability entirely — no `run_command`
 tool exists for the model to be tricked into calling, not even a
 restricted one.
+
+This gap matters more here than it does for the tools tcode is modeled on.
+Claude Code itself only does prefix-based permission gating, not a kernel
+sandbox — tcode's denylist/allowlist guardrail sits at or below that same
+level. But tcode also ships shell access on by default and runs on
+open-weight models that are, in general, less tested against resisting
+injected instructions than the frontier models those permission systems were
+designed around. A page fetched mid-session that tries to talk the agent
+into running something is the live threat this guards against, and it's a
+threat a weaker model is plausibly more susceptible to, not less. If you're
+pointing tcode at genuinely untrusted content, use `TCODE_SHELL=0` or
+`TCODE_WRITE_SCOPE` above, or run tcode inside a container or a
+bubblewrap/firejail wrapper for an actual OS-level boundary — none of this
+guardrail layer is a substitute for one.
 
 ## Web search
 
@@ -290,6 +329,14 @@ full price once.
 If you're on a higher tier, raise or disable these (`TCODE_MAX_RPM=0`,
 larger `TCODE_CLEAR_AFTER_TOKENS`). The defaults are tuned for the free
 tier, not a hard ceiling.
+
+tcode's system prompt deliberately does **not** encourage the model to run
+independent tool calls in parallel, unlike some other coding agents. On a
+generous per-minute budget, parallel calls trade idle capacity for latency.
+Here the binding constraint is the shared RPM ceiling above — parallel calls
+would just burn through that same scarce budget faster, not use up idle
+headroom. Don't add this back without accounting for the throttle it would
+be racing against.
 
 ## Large files and batch tasks
 
@@ -403,6 +450,7 @@ Everything is one file each in `src/`:
   reliably follow on its own
 - `ratelimit.py` — shared cross-process RPM throttle
 - `sessions.py` — conversation save/resume
+- `skills.py` — `/skill <name>` — see "Use" above
 - `ui.py` — terminal rendering
 - `runner.py` — the single-turn execution loop (`cli.py` and `reduce.py`
   both use it)

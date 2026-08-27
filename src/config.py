@@ -161,11 +161,15 @@ class Config:
     check_citations: bool
     require_citation_for: list[str]
     distill_model: str | None
+    expert_model: str | None
+    expert_provider: str | None
+    expert_provider_api_key: str | None
     rpm_state_file: Path
     groq_rpm_state_file: Path
     project_slug: str
     project_dir: Path
     memory_dir: Path
+    skills_dir: Path
     sessions_dir: Path
     steps_dir: Path
     scratch_dir: Path
@@ -331,9 +335,41 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     # `provider` above is (same constraint TCODE_VERIFY_MODEL already has).
     distill_model = os.environ.get("TCODE_DISTILL_MODEL", "").strip() or None
 
+    # Unset (the default) means SubAgents' model menu stays empty, so
+    # delegate_task's schema never offers a `model` argument at all and
+    # behavior is unchanged — same conditional-capability pattern
+    # web_capabilities/Shell already use. Set to reach for a genuinely
+    # stronger model (or the same model with more reasoning effort) for one
+    # hard delegated sub-problem, provider:model_id format matching
+    # parse_model_spec above. See agent.py's SubAgents(models=...) wiring.
+    raw_expert_model = os.environ.get("TCODE_EXPERT_MODEL", "").strip()
+    expert_model: str | None = None
+    expert_provider: str | None = None
+    expert_provider_api_key: str | None = None
+    if raw_expert_model:
+        expert_provider, expert_model = parse_model_spec(raw_expert_model)
+        if expert_provider == "groq":
+            expert_provider_api_key = api_key
+        else:
+            key_env = _PROVIDER_API_KEY_ENV[expert_provider]
+            expert_provider_api_key = os.environ.get(key_env, "").strip()
+            if not expert_provider_api_key:
+                raise ConfigError(
+                    f"TCODE_EXPERT_MODEL={raw_expert_model!r} needs {key_env}, which is not set.\n\n"
+                    f"Add it to a .env file in this directory ({cwd / '.env'}) or to "
+                    f"your global config ({GLOBAL_DIR / '.env'}):\n\n"
+                    f"  {key_env}=..."
+                )
+
     slug = _slugify(cwd)
     project_dir = GLOBAL_DIR / "projects" / slug
     memory_dir = GLOBAL_DIR / "memory"
+    # Global, not per-project, like memory_dir above: a skill is a reusable
+    # prompt snippet the user wrote once, not conversation state tied to a
+    # single project. /skill <name> in the interactive REPL loads one on
+    # demand (see skills.py) — a deliberately human-invoked, deterministic
+    # alternative to the harness's own model-initiated Skills capability.
+    skills_dir = GLOBAL_DIR / "skills"
     sessions_dir = project_dir / "sessions"
     steps_dir = project_dir / "steps"
     # Inside the workspace, not under GLOBAL_DIR like everything else here:
@@ -346,7 +382,7 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     # up in a listing, making it undiscoverable in practice.
     scratch_dir = cwd / "tcode-scratch"
 
-    for d in (memory_dir, sessions_dir, steps_dir, scratch_dir):
+    for d in (memory_dir, skills_dir, sessions_dir, steps_dir, scratch_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     return Config(
@@ -370,11 +406,15 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         check_citations=check_citations,
         require_citation_for=require_citation_for,
         distill_model=distill_model,
+        expert_model=expert_model,
+        expert_provider=expert_provider,
+        expert_provider_api_key=expert_provider_api_key,
         rpm_state_file=rpm_state_file,
         groq_rpm_state_file=groq_rpm_state_file,
         project_slug=slug,
         project_dir=project_dir,
         memory_dir=memory_dir,
+        skills_dir=skills_dir,
         sessions_dir=sessions_dir,
         steps_dir=steps_dir,
         scratch_dir=scratch_dir,

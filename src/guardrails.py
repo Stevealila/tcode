@@ -184,7 +184,10 @@ def _looks_truncated(url: str, seen: set[str]) -> bool:
     contained — the mechanical case a post-write check can catch with no
     model judgment involved at all.
     """
-    if url.rstrip(").,;:!?]}").endswith(("…", "...")):
+    # "." is deliberately excluded from this strip set: it's what "..."
+    # itself is made of, so stripping it first would swallow the very
+    # ellipsis the endswith check below is looking for.
+    if url.rstrip("),;:!?]}").endswith(("…", "...")):
         return True
     return any(seen_url != url and seen_url.startswith(url) for seen_url in seen)
 

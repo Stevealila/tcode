@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import sys
 import time
+from collections import Counter
 
 from pydantic_ai import Agent, UnexpectedModelBehavior, UsageLimits
 from pydantic_ai.messages import (
@@ -26,6 +27,7 @@ from pydantic_ai.messages import (
 from . import ui
 from .config import Config
 from .ratelimit import throttle
+from .telemetry import record_smell
 
 _MARKDOWN_TABLE_ROW = re.compile(r"\|\s*-{2,}\s*\|")
 _SUBSTANTIVE_ANSWER_CHARS = 800
@@ -47,7 +49,7 @@ def _looks_like_faked_tool_call(text: str) -> bool:
     return bool(_FAKE_TOOL_CALL_PREFIX.match(text.strip()))
 
 
-def _skipped_reading_files(tool_names: set[str], final_text: str) -> bool:
+def _skipped_reading_files(tool_names: Counter[str], final_text: str) -> bool:
     """Whether this turn produced a substantial answer without reading any file.
 
     A `ToolGuardrail` can force the *scoping* of exploration (see
@@ -99,7 +101,7 @@ async def run_turn(
     for attempt in range(_MAX_EMPTY_TURN_RETRIES + 1):
         streaming_text = False
         final_text_parts: list[str] = []
-        tool_names: set[str] = set()
+        tool_names: Counter[str] = Counter()
 
         try:
             async with agent.iter(
@@ -140,12 +142,13 @@ async def run_turn(
                             async for event in stream:
                                 if isinstance(event, FunctionToolCallEvent):
                                     part = event.part
-                                    tool_names.add(part.tool_name)
-                                    try:
-                                        args = part.args_as_dict()
-                                    except Exception:
-                                        args = {}
-                                    ui.render_tool_call(part.tool_name, args, quiet=quiet)
+                                    tool_names[part.tool_name] += 1
+                                    if part.tool_name not in ui.PLAN_TOOL_NAMES:
+                                        try:
+                                            args = part.args_as_dict()
+                                        except Exception:
+                                            args = {}
+                                        ui.render_tool_call(part.tool_name, args, quiet=quiet)
                                 elif isinstance(event, FunctionToolResultEvent):
                                     is_error = isinstance(event.part, RetryPromptPart)
                                     content = (
@@ -153,7 +156,10 @@ async def run_turn(
                                         if event.content is not None
                                         else event.part.content
                                     )
-                                    ui.render_tool_result(event.part.tool_name, content, is_error, quiet=quiet)
+                                    if event.part.tool_name in ui.PLAN_TOOL_NAMES and not is_error:
+                                        ui.render_plan_update(content, quiet=quiet)
+                                    else:
+                                        ui.render_tool_result(event.part.tool_name, content, is_error, quiet=quiet)
 
                 if streaming_text and not capture:
                     sys.stdout.write("\n")
@@ -219,6 +225,7 @@ async def run_turn(
     elapsed = time.monotonic() - start
     usage = result.usage
     ui.render_usage(usage.cost, usage.total_tokens, elapsed, quiet=quiet)
+    record_smell(cfg, prompt, dict(tool_names), attempt, elapsed, usage)
 
     final_text = "".join(final_text_parts)
     if _skipped_reading_files(tool_names, final_text):

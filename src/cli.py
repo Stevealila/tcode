@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as _dt
 import json
 import os
 import re
@@ -13,7 +14,7 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from pydantic_ai import ModelHTTPError, UsageLimits
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 from pydantic_ai_harness.guardrails import ToolCallInfo
 
 from . import ui
@@ -21,7 +22,9 @@ from .agent import build_agent
 from .config import Config, ConfigError, load_config
 from .guardrails import citation_paths_exist, confidence_tags_need_citation
 from .runner import run_turn
-from .sessions import list_sessions, load_latest_session, save_session
+from .sessions import list_sessions, load_archive, load_latest_session, save_session
+from .skills import list_skills, load_skill
+from .telemetry import load_smell_log
 
 
 def _resolve_write_path(cfg: Config, raw: str) -> Path:
@@ -360,6 +363,10 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
     prompt_session: PromptSession[str] = PromptSession(
         history=FileHistory(str(cfg.history_file))
     )
+    # Set by /skill <name>, consumed by the next real prompt (see below) —
+    # a human explicitly loading a skill for their own next message, not
+    # the model deciding when to reach for one. See skills.py.
+    staged_skill: str | None = None
 
     while True:
         try:
@@ -386,9 +393,29 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
         if user_input == "/sessions":
             ui.show_sessions(list_sessions(cfg))
             continue
+        if user_input in ("/skill", "/skills") or user_input.startswith("/skill "):
+            name = user_input.partition(" ")[2].strip()
+            if not name:
+                ui.show_skills(list_skills(cfg.skills_dir))
+                continue
+            content = load_skill(cfg.skills_dir, name)
+            if content is None:
+                ui.print_notice(
+                    f"no skill named {name!r} in {cfg.skills_dir} "
+                    f"(available: {', '.join(list_skills(cfg.skills_dir)) or 'none'})"
+                )
+                continue
+            staged_skill = content
+            ui.print_notice(f"loaded skill {name!r} — it'll be added to your next message")
+            continue
+
+        prompt = user_input
+        if staged_skill is not None:
+            prompt = f"{staged_skill}\n\n{user_input}"
+            staged_skill = None
 
         try:
-            message_history, _ = await run_turn(agent, user_input, message_history, usage_limits, cfg)
+            message_history, _ = await run_turn(agent, prompt, message_history, usage_limits, cfg)
         except KeyboardInterrupt:
             ui.print_notice("interrupted")
             continue
@@ -514,6 +541,79 @@ async def reduce_mode(
     save_session(cfg, message_history)
 
 
+def _last_user_prompt(messages: list[ModelMessage]) -> str | None:
+    """The most recently added user prompt in an archived session's message
+    list — the actual instruction that produced this archive, as opposed to
+    earlier turns of the same conversation already covered by their own
+    archive files."""
+    prompt = None
+    for msg in messages:
+        if isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                    prompt = part.content
+    return prompt
+
+
+def _closest_smell_record(records: list[dict], archive_dt: _dt.datetime, window_s: float = 120.0) -> dict | None:
+    """The smell.jsonl record for the turn that produced `archive_dt`.
+
+    record_smell fires moments before save_session within the same turn, so
+    the right record is the one whose own timestamp is closest to, but not
+    after, the archive's — matched by proximity rather than requiring an
+    exact timestamp, since the two writes are never simultaneous.
+    """
+    best, best_delta = None, None
+    for r in records:
+        try:
+            r_dt = _dt.datetime.fromisoformat(r["timestamp"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        delta = (archive_dt - r_dt).total_seconds()
+        if 0 <= delta <= window_s and (best_delta is None or delta < best_delta):
+            best, best_delta = r, delta
+    return best
+
+
+async def backtest_mode(cfg: Config, n: int) -> None:
+    """Replay the last N archived prompts fresh (no history) against the
+    *current* cfg.model, diffing each one's tool-call count/retries/elapsed/
+    tokens against what was recorded for it at the time (smell.jsonl, see
+    telemetry.py) — a cheap regression-smell check before trusting a model
+    swap, not a correctness eval. See betterment/plan.txt 3.1.c.
+    """
+    archives = list_sessions(cfg)[:n]
+    if not archives:
+        ui.print_notice("no saved sessions to backtest against")
+        return
+
+    smell_records = load_smell_log(cfg)
+    agent = build_agent(cfg)
+    usage_limits = UsageLimits(request_limit=cfg.request_limit)
+
+    rows: list[tuple[str, dict | None, dict | None]] = []
+    for path in reversed(archives):  # oldest first, easier to read chronologically
+        try:
+            archive_dt = _dt.datetime.strptime(path.stem, "%Y%m%d-%H%M%S")
+        except ValueError:
+            continue
+        prompt = _last_user_prompt(load_archive(path))
+        if prompt is None:
+            continue
+        old = _closest_smell_record(smell_records, archive_dt)
+        try:
+            await run_turn(agent, prompt, [], usage_limits, cfg, quiet=True, capture=True)
+        except Exception as e:  # noqa: BLE001 - one bad replay shouldn't stop the rest
+            ui.print_notice(f"backtest: {path.stem} failed to replay: {e}")
+            continue
+        after = load_smell_log(cfg)
+        new = after[-1] if len(after) > len(smell_records) else None
+        smell_records = after
+        rows.append((prompt, old, new))
+
+    ui.render_backtest_table(rows)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tcode",
@@ -555,6 +655,15 @@ def build_parser() -> argparse.ArgumentParser:
         "model's own write succeeding. Relative to this directory.",
     )
     parser.add_argument(
+        "--backtest", nargs="?", type=int, const=10, default=None, metavar="N",
+        help="replay the last N archived prompts (default 10) fresh against the "
+        "current model and diff each one's tool-call count/retries/elapsed/tokens "
+        "against what was recorded for it at the time — a cheap regression-smell "
+        "check before trusting a model swap, not a correctness eval. Needs prior "
+        "turns to have run with telemetry on (always on by default; see "
+        "smell.jsonl under this project's sessions directory).",
+    )
+    parser.add_argument(
         "--reduce", metavar="PATTERN", default=None,
         help="one-shot mode only: PATTERN is a glob (relative to this directory, ** "
         "allowed) matching many files to read and reduce to one answer — the prompt "
@@ -581,6 +690,10 @@ def main() -> None:
 
     if args.sessions:
         ui.show_sessions(list_sessions(cfg))
+        return
+
+    if args.backtest is not None:
+        asyncio.run(backtest_mode(cfg, args.backtest))
         return
 
     prompt = " ".join(args.prompt).strip()

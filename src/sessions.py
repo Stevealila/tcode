@@ -63,6 +63,21 @@ def load_latest_session(cfg: Config) -> list[ModelMessage]:
         return []
 
 
+def load_archive(path: Path) -> list[ModelMessage]:
+    """Load one archived session file, same best-effort posture as
+    load_latest_session (a corrupted or schema-mismatched archive returns
+    empty rather than raising)."""
+    if not path.exists():
+        return []
+    data = path.read_bytes()
+    if not data:
+        return []
+    try:
+        return ModelMessagesTypeAdapter.validate_json(data)
+    except ValidationError:
+        return []
+
+
 def list_sessions(cfg: Config) -> list[Path]:
     archives = sorted(
         (p for p in cfg.sessions_dir.glob("*.json") if p.name != "latest.json"),
