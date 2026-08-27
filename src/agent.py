@@ -81,19 +81,18 @@ def _repo_context(workspace_dir: Path, *, home_dir: Path | None) -> list[Abstrac
 
     Two instances:
 
-    1. The user's global `~/.tcode/TCODE.md` — tcode's equivalent of Claude
-       Code's `~/.claude/CLAUDE.md` or Codex's `~/.codex/AGENTS.md`. It sits
-       outside the workspace walk-up chain, so it needs its own RepoContext
-       rooted at GLOBAL_DIR. Listed first => rendered first => lowest
-       precedence, the right place for "my standing preferences everywhere."
-       Only `TCODE.md` here, not the whole tuple: `~/.tcode` is tcode's
-       private dir, not a place to honour another tool's global config.
+    1. The user's global `~/.tcode/TCODE.md`, standing instructions applied
+       in every project. It sits outside the workspace walk-up chain, so it
+       needs its own RepoContext rooted at GLOBAL_DIR. Listed first =>
+       rendered first => lowest precedence, the right place for "my standing
+       preferences everywhere." Only `TCODE.md` here, not the whole tuple:
+       `~/.tcode` is tcode's private dir, not a place to honour another
+       tool's global config.
 
     2. The workspace walk-up: `_INSTRUCTION_FILENAMES` from `workspace_dir`
        up through `home_dir` (when given), plus nested-on-traversal so a
        subdirectory's instruction file surfaces the first time the model
-       lists or reads that directory — matching how Claude Code picks up a
-       nested `CLAUDE.md`.
+       lists or reads that directory.
 
     Only instance 2 exposes the asset-inventory tool; a second registration
     would collide on the tool name.

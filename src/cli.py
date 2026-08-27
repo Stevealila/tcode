@@ -488,10 +488,10 @@ async def _compact_command(
 
 _INIT_PROMPT = """\
 Create a file named TCODE.md in the current directory: the project's
-instruction file for a coding agent (tcode's equivalent of CLAUDE.md /
-AGENTS.md, and it takes precedence over those).
+instruction file for tcode. It takes precedence over any CLAUDE.md /
+AGENTS.md that tcode also reads for cross-tool compatibility.
 
-Do a single, bounded exploration pass — you do not need exhaustive coverage:
+Do a single, bounded exploration pass; you do not need exhaustive coverage:
 
 1. list the top-level directory
 2. read each of these once if it exists: README, pyproject.toml / setup.cfg /
@@ -500,12 +500,12 @@ Do a single, bounded exploration pass — you do not need exhaustive coverage:
 3. list one or two levels of the main source directory
 
 Read each file at most once. If build / test / lint tooling isn't visible in
-those files, it very likely doesn't exist — record "none found" and move on
+those files, it very likely doesn't exist: record "none found" and move on
 rather than searching for it. Then write TCODE.md, concise and factual:
 
 - what the project is, in a sentence or two
 - build / test / lint / run commands you actually saw (or "none found")
-- the directory layout — what lives where
+- the directory layout, what lives where
 - conventions, invariants, or gotchas worth knowing
 
 Don't invent commands. Leave any existing CLAUDE.md / AGENTS.md in place.
@@ -517,7 +517,7 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
     ui.print_banner(cfg)
 
-    # Claude Code's coral `>` caret.
+    # Coral `>` caret.
     prompt_style = Style.from_dict({"prompt": f"{ui.ACCENT} bold"})
     prompt_message = [("class:prompt", "> ")]
     prompt_session: PromptSession[str] = PromptSession(
@@ -988,11 +988,9 @@ def main() -> None:
     if not prompt and not sys.stdin.isatty():
         # No positional prompt, and stdin isn't a terminal: something's
         # piped in (`echo "..." | tcode`, or a caller passing the prompt as
-        # subprocess `input=` — Claude Code's own `-p` accepts a prompt
-        # either way, and brain_call.py-shaped Python callers already use
-        # `input=` uniformly for every provider they invoke). Falling
-        # through to the interactive REPL here would hang forever reading
-        # from a pipe that's never going to send REPL commands.
+        # subprocess `input=`). Falling through to the interactive REPL here
+        # would hang forever reading from a pipe that's never going to send
+        # REPL commands.
         prompt = sys.stdin.read().strip()
 
     if prompt and args.verify:

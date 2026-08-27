@@ -21,12 +21,10 @@ from .config import Config
 if TYPE_CHECKING:
     from .context import ContextReport
 
-# Claude Code's signature accent — a warm coral used for the welcome mark,
-# the assistant-turn bullet, and tool-call markers, so tcode's terminal
-# reads like the tool it's an alternative to.
+# A warm coral accent, used for the welcome mark, the assistant-turn
+# bullet, and tool-call markers.
 ACCENT = "#d97757"
-# The assistant-turn bullet and the tool-call / tool-result tree glyphs,
-# lifted from Claude Code's transcript style.
+# The assistant-turn bullet and the tool-call / tool-result tree glyphs.
 TURN_MARK = "⏺"
 TREE_MARK = "⎿"
 
@@ -58,11 +56,10 @@ _PLAN_CURRENT = re.compile(r"\[~\]\s*\[[^\]]+\]\s*(.+)")
 
 console = Console(highlight=False)
 # Tool-call activity, the usage footer, and notices are diagnostics, not the
-# answer — a scripted caller (parsing stdout for a clean model response, the
-# way brain_call.call() parses a JSON decision out of headless claude's
-# stdout) needs a way to keep them off stdout without losing them entirely.
-# --quiet routes them here instead of dropping them; the model's actual text
-# output is untouched either way. Rich auto-detects a non-tty file() and
+# answer. A scripted caller (parsing stdout for a clean model response, e.g.
+# a JSON decision) needs a way to keep them off stdout without losing them
+# entirely. --quiet routes them here instead of dropping them; the model's
+# actual text output is untouched either way. Rich auto-detects a non-tty file() and
 # skips ANSI codes on its own, so no extra config needed for piped output.
 console_err = Console(highlight=False, file=sys.stderr)
 
@@ -89,7 +86,7 @@ _HELP_ROWS = [
 def print_banner(cfg: Config) -> None:
     model = f"{cfg.provider}:{cfg.model}" if cfg.provider != "groq" else cfg.model
     effort = f"  [dim](effort: {cfg.effort})[/dim]" if cfg.effort else ""
-    tagline = "[dim]— an alternative to Claude Code[/dim]"
+    tagline = "[dim]a fast, young coding CLI on free-tier LLMs[/dim]"
     rows = [
         f"[{ACCENT}]✻[/{ACCENT}] [bold]Welcome to tcode[/bold]  {tagline}",
         "",
@@ -141,8 +138,8 @@ def print_notice(message: str, *, quiet: bool = False) -> None:
 
 
 def begin_assistant_message(*, quiet: bool = False) -> None:
-    """Print Claude Code's coral turn-bullet just before the model's streamed
-    text starts. Caller keeps writing the answer on the same line.
+    """Print the coral turn-bullet just before the model's streamed text
+    starts. Caller keeps writing the answer on the same line.
 
     Used only on the raw-text path (output piped to a non-terminal, so
     MarkdownStream would have nothing to animate). Never called in
@@ -154,8 +151,8 @@ def begin_assistant_message(*, quiet: bool = False) -> None:
 
 class MarkdownStream:
     """Live-rendered Markdown for the model's streamed answer, so an
-    interactive user sees the same rendered headings / tables / fenced code
-    Claude Code shows instead of raw `|---|` and `###` in the scrollback.
+    interactive user sees rendered headings / tables / fenced code instead
+    of raw `|---|` and `###` in the scrollback.
 
     One instance per turn; `feed()` each text delta, `close()` when the text
     block ends (a tool call interrupts it, or the turn finishes). Each text

@@ -90,12 +90,10 @@ def _default_verify_model(primary_model: str) -> str:
 async def _run_external_verifier(cmd: str, prompt: str, timeout: int) -> str:
     """Run an arbitrary external command as the verifier, prompt via stdin.
 
-    Stdin (not argv) specifically to match how a Claude Code-shaped
-    verifier is actually invoked elsewhere in this codebase's own
-    ecosystem (brain_call.py's `_run`), so `TCODE_VERIFY_CMD="claude -p
-    --model haiku --allowedTools Read Grep Glob Bash --disallowedTools
-    Edit Write NotebookEdit"` works without the caller needing to know
-    tcode's own argv-based convention.
+    Stdin (not argv), since most external LLM CLIs accept a prompt that way
+    and it sidesteps shell-quoting a long prompt into the command string.
+    Set `TCODE_VERIFY_CMD` to any read-only external LLM CLI invocation and
+    tcode feeds it the prompt on stdin.
     """
     def _run() -> str:
         try:
