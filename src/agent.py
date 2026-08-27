@@ -34,7 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import Capability
+from pydantic_ai.capabilities import AbstractCapability, Capability
 from pydantic_ai.models.groq import GroqModel, GroqModelSettings
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai.settings import ModelSettings
@@ -54,7 +54,7 @@ from pydantic_ai_harness.memory import FileStore
 from pydantic_ai_harness.subagents import ModelOption
 from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
-from .config import Config
+from .config import GLOBAL_DIR, Config
 from .files import file_capabilities
 from .guardrails import (
     WRITE_TOOLS,
@@ -64,7 +64,55 @@ from .guardrails import (
     scope_shell_exploration,
     scope_writes_to,
 )
+from .model_quirks import normalize_tool_namespaces
 from .web import current_time_instructions, web_capabilities
+
+
+# Instruction filenames RepoContext autoloads, in within-directory precedence
+# order — LAST wins, because RepoContext renders a directory's files in this
+# order and the model weights the most-recent block most. So in a directory
+# holding several of these, tcode's own TCODE.local.md (personal, uncommitted)
+# beats TCODE.md, which beats a CLAUDE.md/AGENTS.md that tcode only reads for
+# cross-tool compatibility. Across directories, closest-to-cwd still wins over
+# all of these (ancestor-first, workspace-last).
+_INSTRUCTION_FILENAMES = ("CLAUDE.md", "AGENTS.md", "TCODE.md", "TCODE.local.md")
+
+
+def _repo_context(workspace_dir: Path, *, home_dir: Path | None) -> list[AbstractCapability]:
+    """RepoContext capabilities for one agent.
+
+    Two instances:
+
+    1. The user's global `~/.tcode/TCODE.md` — tcode's equivalent of Claude
+       Code's `~/.claude/CLAUDE.md` or Codex's `~/.codex/AGENTS.md`. It sits
+       outside the workspace walk-up chain, so it needs its own RepoContext
+       rooted at GLOBAL_DIR. Listed first => rendered first => lowest
+       precedence, the right place for "my standing preferences everywhere."
+       Only `TCODE.md` here, not the whole tuple: `~/.tcode` is tcode's
+       private dir, not a place to honour another tool's global config.
+
+    2. The workspace walk-up: `_INSTRUCTION_FILENAMES` from `workspace_dir`
+       up through `home_dir` (when given), plus nested-on-traversal so a
+       subdirectory's instruction file surfaces the first time the model
+       lists or reads that directory — matching how Claude Code picks up a
+       nested `CLAUDE.md`.
+
+    Only instance 2 exposes the asset-inventory tool; a second registration
+    would collide on the tool name.
+    """
+    return [
+        RepoContext(
+            workspace_dir=GLOBAL_DIR,
+            filenames=("TCODE.md",),
+            expose_inventory_tool=False,
+        ),
+        RepoContext(
+            workspace_dir=workspace_dir,
+            home_dir=home_dir,
+            filenames=_INSTRUCTION_FILENAMES,
+            nested_traversal=True,
+        ),
+    ]
 
 
 _WEB_INSTRUCTIONS = """
@@ -250,7 +298,7 @@ def _explorer(workspace: str | Path) -> SubAgent:
         instructions="Answer with concrete paths and evidence.",
         capabilities=[
             FileSystem(workspace, read_only=True),
-            RepoContext(workspace_dir=Path(workspace)),
+            *_repo_context(Path(workspace), home_dir=None),
         ],
     )
     return SubAgent(agent)
@@ -262,6 +310,17 @@ def _build_model_for(provider: str, model_id: str, provider_api_key: str):
     (`_build_model`) and an expert-model menu entry (see
     `_expert_models_menu`) need, since each provider takes a different API
     key and Model/Provider class pair.
+
+    Every model is wrapped by `normalize_tool_namespaces`: gpt-oss on Groq
+    (tcode's default) intermittently emits `functions/read_file` for a tool
+    registered as `read_file`, and the wrapper strips that back off before
+    the agent rejects the call — see model_quirks.py.
+    """
+    return normalize_tool_namespaces(_build_raw_model_for(provider, model_id, provider_api_key))
+
+
+def _build_raw_model_for(provider: str, model_id: str, provider_api_key: str):
+    """The unwrapped per-provider Model.
 
     Groq is the only provider imported unconditionally (see module
     docstring): it's tcode's zero-setup default, so its client library is a
@@ -375,11 +434,14 @@ def build_agent(cfg: Config) -> Agent:
             ]
         ),
         FileSystem(workspace, read_only=cfg.readonly),
-        # home_dir enables walk-up so a monorepo-root CLAUDE.md above cfg.cwd
-        # is loaded too. Precedence is ancestor-first, workspace-last, so a
-        # workspace-level CLAUDE.md still wins on conflict with a home-level
-        # one — see README's "How state is laid out" section.
-        RepoContext(workspace_dir=cfg.cwd, home_dir=Path.home()),
+        # Autoload instruction files: the user's global ~/.tcode/TCODE.md, then
+        # a walk-up of TCODE(.local).md / CLAUDE.md / AGENTS.md from cfg.cwd
+        # through $HOME so a monorepo-root file is picked up even when tcode is
+        # launched from a subdirectory, plus nested subdirectory files on first
+        # traversal. Precedence: global < ancestor < workspace, and within one
+        # directory TCODE.local.md > TCODE.md > CLAUDE.md/AGENTS.md. See
+        # _repo_context and the README's "How state is laid out" section.
+        *_repo_context(cfg.cwd, home_dir=Path.home()),
         Planning(),
         # Always on, unlike web_capabilities: this is a FileSystem gap
         # (large local files), not something that needs an external

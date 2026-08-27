@@ -57,6 +57,7 @@ BANNER = """\
 HELP = """\
 [bold]Commands[/bold]
   /help          show this help
+  /init          scan the project and write a TCODE.md instruction file
   /clear         clear the conversation in this session
   /memory        show the global memory notebook
   /sessions      list saved sessions for this project

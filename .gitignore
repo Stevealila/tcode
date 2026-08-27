@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 dist/
 .env
+TCODE.local.md
 images/
 betterment/
 improvements_bt.txt

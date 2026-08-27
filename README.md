@@ -116,6 +116,7 @@ tcode --quiet "summarize today's log" > answer.txt   # one-shot, clean stdout
 Slash commands inside an interactive session:
 
 - `/help` — list commands
+- `/init` — explore the project and write a `TCODE.md` instruction file for it
 - `/clear` — clear the in-memory conversation (keeps the saved session file until you send another message)
 - `/memory` — show what's currently in the global memory notebook
 - `/sessions` — list saved sessions for this project
@@ -226,8 +227,9 @@ path you ran `tcode` from.
 ```
 ~/.tcode/
   memory/                       # global, persists across every project
+  TCODE.md                      # global instructions, loaded in every project
   projects/
-    -home-alice-some-project/
+    home-alice-some-project/
       sessions/                 # this project's conversation history
       steps/                    # harness StepPersistence execution log
 ```
@@ -238,12 +240,26 @@ you've given it), so that carries into every project. Conversation history
 and step logs are per-project, so switching directories switches context
 the way switching repos should.
 
-Separately, tcode also auto-loads `CLAUDE.md`/`AGENTS.md` files as static
-instructions: it scans from the directory you launched `tcode` from up
-through your home directory, so a monorepo-root file is picked up even when
-you run `tcode` from a subdirectory. When more than one is found, precedence
-is ancestor-first, workspace-last — a `CLAUDE.md` in the directory you're
-actually working in wins on conflict over one further up the tree.
+Separately, tcode also auto-loads Markdown instruction files as static
+context. Its own file is `TCODE.md` — the tcode counterpart to Claude
+Code's `CLAUDE.md`, Codex's `AGENTS.md`, or Gemini's `GEMINI.md` — and for
+cross-tool compatibility it also reads `CLAUDE.md` and `AGENTS.md` when
+present. Where these are looked for:
+
+- **Global:** `~/.tcode/TCODE.md`, applied in every project — the place for
+  standing preferences that aren't tied to one repo.
+- **Walk-up:** every directory from the one you launched `tcode` from up
+  through your home directory, so a monorepo-root file is picked up even
+  when you run `tcode` from a subdirectory.
+- **Nested:** a subdirectory's instruction file is pulled in the first time
+  the agent reads or lists that directory during the session.
+- **Personal, uncommitted:** `TCODE.local.md` alongside `TCODE.md`, for
+  overrides you don't want to check in (add it to `.gitignore`).
+
+When more than one applies, precedence runs global < ancestor < workspace,
+and within a single directory `TCODE.local.md` > `TCODE.md` >
+`CLAUDE.md`/`AGENTS.md` — the file closest to where you're working, and
+most specific to tcode, wins.
 
 ## Shell access
 
@@ -470,6 +486,8 @@ Everything is one file each in `src/`:
 - `reduce.py` — `--reduce`'s internal map-reduce over many files
 - `guardrails.py` — technical backstops for instructions the model doesn't
   reliably follow on its own
+- `model_quirks.py` — wraps the model to paper over provider glitches (today:
+  gpt-oss on Groq emitting `functions/read_file` for a tool named `read_file`)
 - `ratelimit.py` — shared cross-process RPM throttle
 - `sessions.py` — conversation save/resume
 - `skills.py` — `/skill <name>` — see "Use" above

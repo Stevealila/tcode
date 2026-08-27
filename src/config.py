@@ -107,11 +107,40 @@ def _rpm_for(provider: str) -> tuple[int, Path]:
 def _slugify(path: Path) -> str:
     """Turn an absolute path into a filesystem-safe slug, e.g.
 
-    /home/alice/some-project -> -home-alice-some-project
+    /home/alice/some-project -> home-alice-some-project
+
+    The leading separator is stripped so the slug never starts with `-`: a
+    `~/.tcode/projects/-home-alice-x` directory can't be `cd`'d into or passed
+    to most commands without a `--` guard, which made the state dir a chore to
+    inspect. `_migrate_legacy_project_dirs` renames the old `-`-prefixed dirs.
     """
-    resolved = str(path.resolve())
+    resolved = str(path.resolve()).strip(os.sep)
     slug = resolved.replace(os.sep, "-")
-    return slug or "-root"
+    return slug or "root"
+
+
+def _migrate_legacy_project_dirs(projects_dir: Path) -> None:
+    """One-shot rename of every `-`-prefixed project dir to the current scheme.
+
+    Runs on each startup (a single `iterdir`), not just for the current
+    project, so the whole `~/.tcode/projects/` tree stops being a pile of
+    `cd`-hostile `-name` directories after one more launch. Best-effort: a dir
+    whose de-dashed name is already taken, or that won't rename, is left as-is.
+    """
+    try:
+        entries = list(projects_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name
+        if not entry.is_dir() or not name.startswith("-") or len(name) < 2:
+            continue
+        target = entry.with_name(name[1:])
+        if not target.exists():
+            try:
+                entry.rename(target)
+            except OSError:
+                pass
 
 
 def _load_env_files(cwd: Path) -> None:
@@ -396,6 +425,7 @@ def load_config(
                 )
 
     slug = _slugify(cwd)
+    _migrate_legacy_project_dirs(GLOBAL_DIR / "projects")
     project_dir = GLOBAL_DIR / "projects" / slug
     memory_dir = GLOBAL_DIR / "memory"
     # Global, not per-project, like memory_dir above: a skill is a reusable

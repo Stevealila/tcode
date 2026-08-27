@@ -355,6 +355,32 @@ def _friendly_error(e: Exception) -> str:
     return str(e)
 
 
+_INIT_PROMPT = """\
+Create a file named TCODE.md in the current directory: the project's
+instruction file for a coding agent (tcode's equivalent of CLAUDE.md /
+AGENTS.md, and it takes precedence over those).
+
+Do a single, bounded exploration pass — you do not need exhaustive coverage:
+
+1. list the top-level directory
+2. read each of these once if it exists: README, pyproject.toml / setup.cfg /
+   package.json / Makefile / Cargo.toml (whatever applies), and any existing
+   CLAUDE.md or AGENTS.md
+3. list one or two levels of the main source directory
+
+Read each file at most once. If build / test / lint tooling isn't visible in
+those files, it very likely doesn't exist — record "none found" and move on
+rather than searching for it. Then write TCODE.md, concise and factual:
+
+- what the project is, in a sentence or two
+- build / test / lint / run commands you actually saw (or "none found")
+- the directory layout — what lives where
+- conventions, invariants, or gotchas worth knowing
+
+Don't invent commands. Leave any existing CLAUDE.md / AGENTS.md in place.
+Report what you wrote when done."""
+
+
 async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
     agent = build_agent(cfg)
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
@@ -409,10 +435,14 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
             ui.print_notice(f"loaded skill {name!r} — it'll be added to your next message")
             continue
 
-        prompt = user_input
-        if staged_skill is not None:
-            prompt = f"{staged_skill}\n\n{user_input}"
+        if user_input == "/init":
+            prompt = _INIT_PROMPT
             staged_skill = None
+        else:
+            prompt = user_input
+            if staged_skill is not None:
+                prompt = f"{staged_skill}\n\n{user_input}"
+                staged_skill = None
 
         try:
             message_history, _ = await run_turn(agent, prompt, message_history, usage_limits, cfg)
