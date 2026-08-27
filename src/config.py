@@ -252,6 +252,9 @@ class Config:
     groq_max_rpm: int
     web_search: bool
     tavily_api_key: str | None
+    # True when web was wanted (default, or TCODE_WEB_SEARCH=1) but is off
+    # because TAVILY_API_KEY isn't set. Purely for the banner notice.
+    web_disabled_no_key: bool
     write_scope: list[str]
     check_citations: bool
     require_citation_for: list[str]
@@ -437,19 +440,19 @@ def load_config(
     max_rpm, rpm_state_file = _rpm_for(provider)
     groq_max_rpm, groq_rpm_state_file = _rpm_for("groq")
 
-    # Web search/fetch: on by default, zero setup (DuckDuckGo search + a
-    # distilling fetch, see web.py). Set TCODE_WEB_SEARCH=0 to turn it off,
-    # e.g. if DuckDuckGo is rate-limiting or a project shouldn't touch the
-    # live web at all.
+    # Web search/fetch, on by default. Both tools go through Tavily — a
+    # search/extract API built for agent consumption (clean extracted
+    # content, a finance/news topic mode) rather than SERP snippets and raw
+    # markdownified HTML, which push a weak model toward guessing. Free
+    # tier, no card: https://app.tavily.com. TCODE_WEB_SEARCH=0 turns web
+    # off outright. Without TAVILY_API_KEY there is no web: the tools are
+    # simply not registered (web_effective below), same as TCODE_WEB_SEARCH=0
+    # — surfaced in the banner so it isn't a silent gap.
     raw_web_search = os.environ.get("TCODE_WEB_SEARCH", "").strip().lower()
-    web_search = raw_web_search not in ("0", "false", "no") if raw_web_search else DEFAULT_WEB_SEARCH
-
-    # Optional upgrade over DuckDuckGo's free-text scrape: Tavily is a
-    # search API built for LLM/agent consumption (clean extracted content,
-    # a finance/news topic mode) rather than raw SERP snippets. Free tier,
-    # no card required — get a key at https://app.tavily.com. Auto-detected
-    # by presence, same as GROQ_API_KEY; DuckDuckGo is the fallback when unset.
+    web_requested = raw_web_search not in ("0", "false", "no") if raw_web_search else DEFAULT_WEB_SEARCH
     tavily_api_key = os.environ.get("TAVILY_API_KEY", "").strip() or None
+    web_search = web_requested and tavily_api_key is not None
+    web_disabled_no_key = web_requested and tavily_api_key is None
 
     # Restricts write_file/edit_file/create_directory to one or more path
     # prefixes (comma-separated, relative to cwd) without touching read
@@ -569,6 +572,7 @@ def load_config(
         groq_max_rpm=groq_max_rpm,
         web_search=web_search,
         tavily_api_key=tavily_api_key,
+        web_disabled_no_key=web_disabled_no_key,
         write_scope=write_scope,
         check_citations=check_citations,
         require_citation_for=require_citation_for,

@@ -103,6 +103,11 @@ def print_banner(cfg: Config) -> None:
             "  [dim]sandbox[/dim]  [green]on[/green] "
             "[dim]— workspace + ~/.tcode writable, rest read-only[/dim]"
         )
+    if cfg.web_disabled_no_key:
+        rows.append(
+            "  [dim]web    [/dim]  [yellow]off[/yellow] "
+            "[dim]— set TAVILY_API_KEY (free, app.tavily.com) to enable search/fetch[/dim]"
+        )
     rows += ["", "  [dim]/help for commands  ·  Ctrl-D or /exit to leave[/dim]"]
     console.print(
         Panel(

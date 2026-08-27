@@ -1,22 +1,21 @@
-"""Web search and fetch tools.
+"""Web search and fetch tools — both through Tavily.
 
-DuckDuckGo's snippets and a raw markdownify fetch both push a model toward
+SERP snippets and raw markdownified HTML both push a weak model toward
 guessing: stale SEO copy reads as a current number, and a client-rendered
-page's JS/CSS boilerplate reads as "no real content," which a model tends to
-paper over by inventing a plausible-sounding answer. `_make_web_fetch_tool`
-fixes the fetch side with a two-stage pipeline: fetch and convert to
-markdown, then hand that content plus the caller's *specific question* to a
-second, cheap Groq model (`distill.py`) that says plainly when the page
-doesn't have the answer — so a blank or noisy page produces "not found"
-instead of material to guess from. (Same fetch-then-distill split Claude
-Code's own `WebFetch` uses.) Content under `_DISTILL_SKIP_CHARS` skips the
-extra round-trip.
+page's JS/CSS boilerplate reads as "no real content," which the model papers
+over by inventing a plausible answer. Tavily is a search/extract API built
+for agent consumption — already-extracted content, a finance/news topic
+mode — so both tools start from clean material instead of noise.
 
-Search gets the same fix from the other side: DuckDuckGo stays the
-zero-setup default, but `TAVILY_API_KEY` opts into Tavily — cleaner,
-already-extracted content instead of raw snippets, with a `finance` topic
-mode — auto-detected by the key's presence. Same provider-precedence shape
-as OpenClaw's search-provider chain.
+`web_fetch` adds a second stage: hand Tavily's extracted markdown plus the
+caller's *specific question* to a cheap Groq model (`distill.py`) that says
+plainly when the page doesn't have the answer, so a blank or thin page
+produces "not found" rather than material to guess from. Content under
+`_DISTILL_SKIP_CHARS` skips that round-trip.
+
+Both tools require `TAVILY_API_KEY`; without it `cfg.web_search` is False
+and `web_capabilities` is never called (see config.py). Free tier, no card:
+https://app.tavily.com.
 """
 
 from __future__ import annotations
@@ -26,8 +25,6 @@ from typing import Literal
 
 from pydantic_ai import ModelRetry, Tool
 from pydantic_ai.capabilities import Capability, WebFetch, WebSearch
-from pydantic_ai.common_tools.web_fetch import web_fetch_tool
-from pydantic_ai.messages import BinaryContent
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai_harness.guardrails import ToolGuardrail
 
@@ -52,9 +49,8 @@ def current_time_instructions() -> str:
 
 
 def _make_tavily_search_tool(cfg: Config) -> Tool:
-    from tavily.errors import BadRequestError
-
     from pydantic_ai.common_tools.tavily import tavily_search_tool
+    from tavily.errors import BadRequestError
 
     # topic/time_range/etc. are left unset (not _UNSET) so the model can set
     # them per call — 'finance'/'news' topics and a time_range are exactly
@@ -115,22 +111,31 @@ def _make_tavily_search_tool(cfg: Config) -> Tool:
     return Tool(tavily_search, name="tavily_search", description=base_search.description)
 
 
-def _search_capability(cfg: Config) -> WebSearch:
-    if cfg.tavily_api_key:
-        return WebSearch(native=False, local=_make_tavily_search_tool(cfg))
-    return WebSearch(native=False, local="duckduckgo")
-
-
 def _make_web_fetch_tool(cfg: Config, provider: GroqProvider) -> Tool:
+    from tavily import AsyncTavilyClient
+    from tavily.errors import BadRequestError
+
     distill_agent = make_distill_agent(provider, cfg.distill_model)
-    base_fetch = web_fetch_tool()
+    client = AsyncTavilyClient(api_key=cfg.tavily_api_key)
 
-    async def web_fetch(url: str, prompt: str) -> str | BinaryContent:
-        result = await base_fetch.function(url)
-        if isinstance(result, BinaryContent):
-            return result
+    async def web_fetch(url: str, prompt: str) -> str:
+        # Tavily /extract: clean markdown instead of the raw HTML/JS a
+        # markdownify pass leaves a weak model to hallucinate from. Same
+        # BadRequestError-only catch as tavily_search — a malformed URL is
+        # retryable, an auth/quota failure isn't (see that tool's comment).
+        try:
+            resp = await client.extract(url, format="markdown", query=prompt)
+        except BadRequestError as e:
+            raise ModelRetry(str(e)) from e
 
-        content = result["content"]
+        results = resp.get("results") or []
+        if not results:
+            failed = resp.get("failed_results") or []
+            reason = (failed[0].get("error") if failed and isinstance(failed[0], dict) else None) or "no content extracted"
+            return f"(could not fetch {url}: {reason})"
+
+        top = results[0]
+        content = top.get("raw_content") or ""
         if len(content) < _DISTILL_SKIP_CHARS:
             return content or "(empty page)"
 
@@ -140,8 +145,7 @@ def _make_web_fetch_tool(cfg: Config, provider: GroqProvider) -> Tool:
         await throttle(cfg.rpm_state_file, cfg.max_rpm)
         distilled = await distill_agent.run(
             f"QUESTION: {prompt}\n\n"
-            f"PAGE URL: {result['url']}\n"
-            f"PAGE TITLE: {result['title']}\n\n"
+            f"PAGE URL: {top.get('url', url)}\n\n"
             f"--- PAGE CONTENT ---\n{content}"
         )
         return distilled.output
@@ -161,9 +165,10 @@ def _make_web_fetch_tool(cfg: Config, provider: GroqProvider) -> Tool:
 
 
 def web_capabilities(cfg: Config, provider: GroqProvider) -> list[Capability]:
-    """WebSearch + a distilling WebFetch. Only called when `cfg.web_search` is set."""
+    """Tavily search + a distilling Tavily-extract fetch. Only called when
+    `cfg.web_search` is set, which already requires `cfg.tavily_api_key`."""
     return [
-        _search_capability(cfg),
+        WebSearch(native=False, local=_make_tavily_search_tool(cfg)),
         WebFetch(native=False, local=_make_web_fetch_tool(cfg, provider)),
         # Technical backstop: observed behavior shows the model reaching for
         # shell curl/wget instead of retrying web_fetch/the search tool when

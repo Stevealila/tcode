@@ -37,7 +37,7 @@ GROQ_REQUEST_LIMIT=50              # optional, caps tool-call round-trips per tu
 TCODE_ALLOWED_COMMANDS=git,pytest  # optional, see "Shell access" below
 TCODE_MAX_RPM=30                   # optional, client-side requests/min throttle (0 disables)
 TCODE_WEB_SEARCH=1                 # optional, web search/fetch tools (default on, 0 disables)
-TAVILY_API_KEY=tvly-...            # optional, better web search — see "Web search" below
+TAVILY_API_KEY=tvly-...            # required for web search/fetch — see "Web search" below
 TCODE_CHECK_CITATIONS=1            # optional, reject a write citing a source file that doesn't exist (default off)
 TCODE_DISTILL_MODEL=openai/gpt-oss-120b  # optional, a stronger Groq model for the internal distillation pass (default gpt-oss-20b)
 TCODE_REQUIRE_CITATION_FOR="[CONFIRMED],[MEASURED]"  # optional, reject a write using one of these tags with no citation on that line
@@ -325,21 +325,22 @@ content itself is untrusted.
 
 ## Web search
 
-On by default, no API key needed: a search tool (DuckDuckGo) and a fetch
-tool that reads a URL and distills it down to whatever you actually asked
-for, rather than dumping the raw page. Set `TCODE_WEB_SEARCH=0` to turn both
-off for a project that shouldn't touch the live web.
+On by default. Both the search tool and the fetch tool go through
+[Tavily](https://app.tavily.com) — a search/extract API built for LLM/agent
+use (cleaner extracted content than SERP snippets, a finance/news topic
+mode), with a free tier (1,000 credits/month, no card) that fits the same
+"works without a subscription" goal as everything else here. `web_fetch`
+adds a second stage on top: Tavily's extracted markdown plus your specific
+question go to a cheap model that returns just the answer, or says plainly
+when the page doesn't have it, rather than dumping the raw page for a weak
+model to guess from.
 
-DuckDuckGo's free-text search is the zero-setup default, but its snippets
-are often stale for "what's the current X" questions — static page copy with
-an old example number or date baked in, not what the page shows live. Set
-`TAVILY_API_KEY` to switch the search tool to [Tavily](https://app.tavily.com)
-instead: a search API built for LLM/agent use (cleaner extracted content,
-a finance/news topic mode), with a free tier (1,000 searches/month, no card)
-that fits the same "works without a subscription" goal as everything else
-here. This mirrors how other agent harnesses (OpenClaw, for one) pick a
-search backend: prefer a real search API when a key for one is configured,
-fall back to a scrape when it isn't.
+`TAVILY_API_KEY` is **required for web** — without it both tools are simply
+not registered (the banner says so), the same state as `TCODE_WEB_SEARCH=0`.
+The earlier zero-setup DuckDuckGo search and markdownify fetch are gone:
+DDG's snippets were routinely stale for "what's the current X" questions
+(old example numbers baked into static copy), and raw markdownified HTML
+gave a weak model boilerplate to hallucinate from.
 
 The fetch tool always distills, regardless of which search backend found the
 URL: the page is fetched and converted to markdown, then a second, cheap
