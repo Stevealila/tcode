@@ -1,7 +1,7 @@
 [project]
 name = "tcode"
 version = "0.1.0"
-description = "A fast, small system-wide terminal coding CLI that wraps free-tier LLMs (Groq by default, Google Gemini too, other backends pluggable). Built on Pydantic AI plus Pydantic AI Harness. Suited to scripted, non-interactive runs that turn a prompt over a codebase or data files into a parseable answer, with guardrails for unattended use, as well as everyday interactive edits. Built and run on Linux; not tested or packaged for Windows."
+description = "A fast system-wide terminal coding CLI that wraps free-tier LLMs (Groq by default, Google Gemini too, other backends pluggable). Built on Pydantic AI plus Pydantic AI Harness. Suited to scripted, non-interactive runs that turn a prompt over a codebase or data files into a parseable answer, with guardrails for unattended use, as well as everyday interactive edits. Built and run on Linux; not tested or packaged for Windows."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

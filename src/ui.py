@@ -86,7 +86,7 @@ _HELP_ROWS = [
 def print_banner(cfg: Config) -> None:
     model = f"{cfg.provider}:{cfg.model}" if cfg.provider != "groq" else cfg.model
     effort = f"  [dim](effort: {cfg.effort})[/dim]" if cfg.effort else ""
-    tagline = "[dim]a fast, small coding CLI on free-tier LLMs[/dim]"
+    tagline = "[dim]a fast coding CLI on free-tier LLMs[/dim]"
     rows = [
         f"[{ACCENT}]✻[/{ACCENT}] [bold]Welcome to tcode[/bold]  {tagline}",
         "",

@@ -1,6 +1,6 @@
 # tcode
 
-tcode is a fast, small terminal coding agent that wraps free-tier LLMs. It
+tcode is a fast terminal coding agent that wraps free-tier LLMs. It
 gives you workspace-rooted file read/write/edit/search, a real shell, web
 search, and memory that carries across projects, all running on inference
 you can get without a subscription. Groq is the zero-setup default; Google
