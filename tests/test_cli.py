@@ -188,7 +188,7 @@ class TestClosestSmellRecord:
         assert _closest_smell_record(records, now) is None
 
     def test_matches_a_sub_second_record_written_just_before_the_archive(self):
-        """The real-world shape (betterment/plan.txt O1): record_smell
+        """The real-world shape: record_smell
         stamps microseconds, the archive filename stem is floored to a
         whole second, and record_smell fires a few hundred ms before
         save_session — so raw the record lands *after* its own archive and

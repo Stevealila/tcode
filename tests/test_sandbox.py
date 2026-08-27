@@ -1,6 +1,6 @@
 """Tests for sandbox.py: request detection, command construction, and the
 no-op guard paths of maybe_reexec (the actual os.execvp path can't be
-exercised in-process). See betterment/plan.txt 3.5.c.
+exercised in-process).
 """
 
 from __future__ import annotations

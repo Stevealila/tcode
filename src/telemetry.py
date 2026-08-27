@@ -33,9 +33,9 @@ def record_smell(
     """Append one turn's smell record. Called on *every* exit from
     run_turn, success or failure — a turn that loops until it hits the
     request limit, or crashes with a garbled tool call, is exactly the
-    regression --backtest exists to catch, so it must leave a record too
-    (betterment/plan.txt 6.2 D1). `outcome` is "ok" on the normal path and
-    a short slug otherwise ("model_behavior_error", "usage_limit",
+    regression --backtest exists to catch, so it must leave a record too.
+    `outcome` is "ok" on the normal path and a short slug otherwise
+    ("model_behavior_error", "usage_limit",
     "faked_tool_call", "salvaged_after_tool_failure", ...); `error` carries
     the exception string when there is one. `usage` may be None when the
     turn died before the model returned any usage at all.

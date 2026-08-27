@@ -549,7 +549,7 @@ async def reduce_mode(
 # share of archived sessions would have _last_user_prompt return the
 # warning text and --backtest would replay *that* as the task. Pinned /
 # receipt parts use list-typed content and are already excluded by the
-# `isinstance(part.content, str)` check below. See betterment/plan.txt 6.2 D2.
+# `isinstance(part.content, str)` check below.
 _SYNTHETIC_USER_PART = re.compile(r"^\s*\[[A-Za-z][\w -]*\]")
 
 
@@ -580,8 +580,8 @@ def _closest_smell_record(records: list[dict], archive_dt: _dt.datetime, window_
     `archive_dt` comes from a filename stem (`%Y%m%d-%H%M%S`) floored to a
     whole second. Comparing the two raw makes the turn's own record land a
     fraction of a second *after* its archive (record at HH:MM:SS.6, archive
-    at HH:MM:SS.0), so a "record must precede the archive" guard rejects
-    exactly the record it should match — the bug in betterment/plan.txt O1.
+    at HH:MM:SS.0), so a "record must precede the archive" guard would
+    reject exactly the record it should match.
     Flooring the record timestamp to whole seconds first puts both sides at
     the same resolution; `delta` is then >= 0 for the real match and the
     nearest one wins.
@@ -603,7 +603,7 @@ async def backtest_mode(cfg: Config, n: int) -> None:
     *current* cfg.model, diffing each one's tool-call count/retries/elapsed/
     tokens against what was recorded for it at the time (smell.jsonl, see
     telemetry.py) — a cheap regression-smell check before trusting a model
-    swap, not a correctness eval. See betterment/plan.txt 3.1.c.
+    swap, not a correctness eval.
     """
     archives = list_sessions(cfg)[:n]
     if not archives:
@@ -612,7 +612,7 @@ async def backtest_mode(cfg: Config, n: int) -> None:
 
     # Header so a run from the wrong directory is obvious — all state is
     # cwd-scoped, so `backtest` from the wrong place silently replays a
-    # different project's prompts. See betterment/plan.txt 6.2 D4.
+    # different project's prompts.
     ui.print_notice(
         f"backtest: {cfg.project_label} · {len(archives)} archive(s) · "
         f"replaying against {cfg.provider}:{cfg.model}"
@@ -642,12 +642,12 @@ async def backtest_mode(cfg: Config, n: int) -> None:
         except Exception as e:  # noqa: BLE001 - one bad replay shouldn't stop the rest
             # Include the exception *type*, not just str(e): some harness
             # failures (e.g. a Memory-capability IndexError seen when a
-            # poisoned prompt reached the first model request — 6.2 D3,
-            # worth an upstream report) stringify to something as
-            # uninformative as "list index out of range".
+            # poisoned prompt reaches the first model request, worth an
+            # upstream report) stringify to something as uninformative as
+            # "list index out of range".
             replay_error = f"{type(e).__name__}: {e}"
             ui.print_notice(f"backtest: {path.stem} failed to replay: {replay_error}")
-        # run_turn now writes a smell line on failure too (6.2 D1), so a
+        # run_turn writes a smell line on failure too, so a
         # crashed replay usually still has a `new` record with its own
         # outcome slug; synthesize a minimal one only when even that is
         # missing (the turn died before record_smell could run).

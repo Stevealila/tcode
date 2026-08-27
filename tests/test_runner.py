@@ -1,7 +1,7 @@
 """Tests for runner.py: the faked-tool-call / skipped-reading heuristics
 (pure functions written after specific observed failure modes — see their
 docstrings), plus one end-to-end run_turn against a stubbed model so the
-telemetry write path itself is exercised. See betterment/plan.txt 3.9.b.
+telemetry write path itself is exercised.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ def test_run_turn_writes_a_smell_record(tcode_cfg):
 def test_run_turn_records_a_smell_line_when_the_turn_fails(tcode_cfg):
     """A turn that loops until it hits the request limit is exactly the
     regression --backtest exists to catch — it must leave a smell record
-    even though it raises. See betterment/plan.txt 6.2 D1.
+    even though it raises.
     """
     from pydantic_ai import Agent, UsageLimitExceeded, UsageLimits
     from pydantic_ai.models.test import TestModel
@@ -145,7 +145,7 @@ def test_run_turn_retries_then_gives_up_on_a_persistent_faked_tool_call(tcode_cf
     then returned as-is with outcome 'faked_tool_call' and retry_count at
     the ceiling. Distinct from the salvage branch (that one raises
     UnexpectedModelBehavior mid-turn; this one completes each attempt with
-    a full but malformed answer). See betterment/plan.txt O4.
+    a full but malformed answer).
     """
     from pydantic_ai import Agent, UsageLimits
     from pydantic_ai.models.function import FunctionModel

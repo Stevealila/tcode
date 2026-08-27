@@ -1,7 +1,7 @@
 """Optional OS-level sandbox: re-exec tcode inside bubblewrap (preferred) or
 firejail so the agent's shell and file tools are confined to the workspace
 and ``~/.tcode`` at the kernel level, not just by tcode's in-process
-guardrails — see betterment/plan.txt 3.5.c and README's "Shell access".
+guardrails — see README's "Shell access" section.
 
 This is the backstop for the caller who never sets ``TCODE_SHELL=0``: the
 in-process ``scope_shell_exploration`` / ``scope_writes_to`` /
@@ -19,8 +19,7 @@ the threat model.
 
 Linux only. On any other platform, or when neither sandbox tool is on
 PATH, this is a no-op with a warning — the run continues unsandboxed rather
-than refusing to start, matching the plan's "no-op with a warning
-elsewhere".
+than refusing to start.
 """
 
 from __future__ import annotations

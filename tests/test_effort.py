@@ -1,6 +1,4 @@
-"""Tests for the primary-turn effort dial (--effort / --think / TCODE_EFFORT).
-See betterment/plan.txt O5 / 3.4.c.
-"""
+"""Tests for the primary-turn effort dial (--effort / --think / TCODE_EFFORT)."""
 
 from __future__ import annotations
 

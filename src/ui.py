@@ -175,13 +175,12 @@ def backtest_regression(old: dict | None, new: dict | None) -> str | None:
     limit, crashed on a garbled tool call — flagged even with no baseline);
     then, against the baseline, a tool-call jump (>2), any retry increase,
     >2.5x wall-clock, or >1.5x tokens — a model that runs the same tool
-    sequence but takes 3x as long is still a regression. See
-    betterment/plan.txt 3.1.d.ii and 6.2 D1.
+    sequence but takes 3x as long is still a regression.
     """
     # A replay that looped into the request limit or crashed on a garbled
     # tool call is the most important thing to flag, and it can happen with
     # no baseline to compare against — so check the outcome slug first,
-    # before the old/new guard. See betterment/plan.txt 6.2 D1.
+    # before the old/new guard.
     if new is not None:
         new_outcome = new.get("outcome")
         if new_outcome and new_outcome not in ("ok", "salvaged_after_tool_failure"):

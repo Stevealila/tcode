@@ -120,7 +120,7 @@ async def run_turn(
         """Render the usage footer and write the smell record — exactly
         once, on whichever path the turn exits by (success, salvage,
         raise). record_smell must see the failing runs too; they're the
-        whole point of the telemetry. See betterment/plan.txt 6.2 D1."""
+        whole point of the telemetry."""
         elapsed = time.monotonic() - start
         usage = getattr(result, "usage", None)
         if usage is not None:
@@ -267,7 +267,7 @@ async def run_turn(
             # these propagated straight out with no smell line, so
             # --backtest was blind to exactly the runs that regressed
             # worst. Record, then re-raise unchanged so cli.py's handler
-            # still does its job. See betterment/plan.txt 6.2 D1.
+            # still does its job.
             outcome = _classify_exception(e)
             error = f"{type(e).__name__}: {e}"
             _finalize()

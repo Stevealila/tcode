@@ -1,6 +1,6 @@
 """Tests for cli.backtest_mode's own control flow — the archive skip
 paths and the synthesized "replay crashed" row — with build_agent /
-run_turn stubbed so no model is called. See betterment/plan.txt O4.
+run_turn stubbed so no model is called.
 """
 
 from __future__ import annotations

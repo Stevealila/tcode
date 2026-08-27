@@ -1,6 +1,5 @@
 """Tests for ui.py's backtest_regression: the four-signal
-regression-smell heuristic --backtest flags rows with. See
-betterment/plan.txt 3.1.d.ii.
+regression-smell heuristic --backtest flags rows with.
 """
 
 from __future__ import annotations
