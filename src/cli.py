@@ -62,11 +62,11 @@ def _looks_like_leaked_tool_call(text: str) -> bool:
     Observed on Groq's hosting of more than one model family at large
     (~40-file/~50K-token) reduce inputs: gpt-oss models sometimes emit the
     call as a literal `{"name": "write_file", "arguments": {...}` JSON
-    envelope instead of invoking it; qwen3.6-27b sometimes emits its
-    provider's own `<tool_call><function=write_file>...` pseudo-XML the same
-    way. Either way the text that reaches here is the tool call itself, not
-    an answer — real prose essentially never contains these exact markers,
-    so this is a structural signal, not a guess.
+    envelope instead of invoking it, and some models emit a provider's own
+    `<tool_call><function=write_file>...` pseudo-XML the same way. Either
+    form that reaches here is the tool call itself, not an answer — real
+    prose essentially never contains these exact markers, so this is a
+    structural signal, not a guess.
     """
     stripped = text.strip()
     if stripped.startswith(_LEAKED_TOOL_CALL_PREFIXES):
@@ -520,8 +520,20 @@ async def verify_mode(cfg: Config, prompt: str) -> None:
     specifically so this path's diagnostics can never be mistaken for the
     withheld answer by a downstream best-effort JSON scanner — see that
     helper's docstring for the concrete failure this closes.
+
+    TCODE_VERIFY_ADVISORY=1 relaxes the disagreement contract: the primary's
+    answer is ALWAYS written to stdout (exit 0), and the verdict is emitted
+    to stderr as a stable, machine-readable line — `tcode-verify: AGREE` or
+    `tcode-verify: DISAGREE`. For a caller that must always come away with an
+    answer (an empty result forces some worse default on its side) but still
+    wants the independent re-derivation recorded as a quality signal rather
+    than acted on as a veto. Unset, the strict exit-2 contract above is
+    unchanged.
     """
     from . import verify as verify_mod
+
+    raw_advisory = os.environ.get("TCODE_VERIFY_ADVISORY", "").strip().lower()
+    advisory = raw_advisory not in ("", "0", "false", "no")
 
     agent = build_agent(cfg)
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
@@ -539,7 +551,16 @@ async def verify_mode(cfg: Config, prompt: str) -> None:
     ui.print_notice(f"verify: verifier={_debug_preview(verifier_text)!r}", quiet=True)
     ui.print_notice(f"verify: verdict={_debug_preview(verdict)!r}", quiet=True)
 
-    if agreed:
+    if advisory:
+        sys.stderr.write(f"tcode-verify: {'AGREE' if agreed else 'DISAGREE'}\n")
+        sys.stderr.flush()
+
+    if agreed or advisory:
+        if not agreed:
+            ui.print_notice(
+                "verify: DISAGREEMENT — advisory mode, emitting the primary answer anyway",
+                quiet=True,
+            )
         sys.stdout.write(primary_text)
         if not primary_text.endswith("\n"):
             sys.stdout.write("\n")
@@ -749,7 +770,9 @@ def build_parser() -> argparse.ArgumentParser:
         "it if they agree — stdout is empty and the exit code is 2 on disagreement. "
         "For a caller that shouldn't act on a confidently-wrong-but-clean answer. "
         "Implies --quiet's stdout contract; ignored with -c/--continue (verification "
-        "needs an independent re-derivation, not a continued conversation).",
+        "needs an independent re-derivation, not a continued conversation). "
+        "TCODE_VERIFY_ADVISORY=1 relaxes this: the primary answer is always printed "
+        "(exit 0) and the verdict goes to stderr as 'tcode-verify: AGREE|DISAGREE'.",
     )
     parser.add_argument(
         "--write", metavar="PATH", default=None,

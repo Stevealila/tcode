@@ -61,8 +61,32 @@ _DEFAULT_MAX_RPM_BY_PROVIDER = {
     "zai": 15,
 }
 
+# Models tcode refuses to run — anywhere: primary, verifier, distiller, or
+# expert sub-agent. Matched case-insensitively as a substring of the bare
+# model id. Qwen is on the list after proving unreliable at structured
+# output in real use: it emits raw tool-call envelopes as prose (see cli.py's
+# leaked-tool-call recovery), rejects documented reasoning-effort values (see
+# distill.py), and has produced fabricated figures in otherwise-clean output.
+# A bad verifier or distiller is worse than none — it silently vetoes or
+# corrupts good primary answers — so this is enforced at config load, not
+# left to habit.
+_BANNED_MODEL_SUBSTRINGS = ("qwen", "qwq", "tongyi")
 
-def parse_model_spec(raw: str) -> tuple[str, str]:
+
+def _reject_banned_model(model_id: str, source: str) -> None:
+    """Raise ConfigError if `model_id` is on the permanent block list."""
+    low = model_id.lower()
+    for bad in _BANNED_MODEL_SUBSTRINGS:
+        if bad in low:
+            raise ConfigError(
+                f"{source} requests model {model_id!r}, which tcode will not run: "
+                f"{bad!r} is on the permanent block list (unreliable structured "
+                f"output in practice). Choose another model — on Groq, "
+                f"openai/gpt-oss-120b or openai/gpt-oss-20b."
+            )
+
+
+def parse_model_spec(raw: str, *, source: str = "--model") -> tuple[str, str]:
     """Split a --model value into (provider, model_id).
 
     Groq model ids never contain `:` (they're bare names or `org/name`), so
@@ -79,7 +103,9 @@ def parse_model_spec(raw: str) -> tuple[str, str]:
             if prefix not in _PROVIDER_API_KEY_ENV:
                 known = ", ".join(sorted(_PROVIDER_API_KEY_ENV))
                 raise ConfigError(f"Unknown provider {prefix!r} in --model {raw!r}. Known providers: {known}.")
+            _reject_banned_model(rest, source)
             return prefix, rest
+    _reject_banned_model(raw, source)
     return "groq", raw
 
 
@@ -397,6 +423,8 @@ def load_config(
     # spec — make_distill_agent is Groq-only by design regardless of what
     # `provider` above is (same constraint TCODE_VERIFY_MODEL already has).
     distill_model = os.environ.get("TCODE_DISTILL_MODEL", "").strip() or None
+    if distill_model:
+        _reject_banned_model(distill_model, "TCODE_DISTILL_MODEL")
 
     # Unset (the default) means SubAgents' model menu stays empty, so
     # delegate_task's schema never offers a `model` argument at all and
@@ -410,7 +438,7 @@ def load_config(
     expert_provider: str | None = None
     expert_provider_api_key: str | None = None
     if raw_expert_model:
-        expert_provider, expert_model = parse_model_spec(raw_expert_model)
+        expert_provider, expert_model = parse_model_spec(raw_expert_model, source="TCODE_EXPERT_MODEL")
         if expert_provider == "groq":
             expert_provider_api_key = api_key
         else:

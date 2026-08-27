@@ -49,10 +49,11 @@ exported in your shell always take precedence over both `.env` files;
 a project's `.env` takes precedence over the global one.
 
 Good Groq models for this kind of agentic/tool-calling work: `openai/gpt-oss-120b`
-(default, 131K context) or `qwen/qwen3.6-27b` (an alternative worth
-comparing on your workload). Check `GET /openai/v1/models` against your own
-key before picking one — Groq's catalog changes, and a model that's current
-today may be gone in a few months.
+(default, 131K context) or the smaller, faster `openai/gpt-oss-20b`. Check
+`GET /openai/v1/models` against your own key before picking one — Groq's
+catalog changes, and a model that's current today may be gone in a few
+months. tcode refuses to run Qwen models (unreliable structured output in
+practice); see `_BANNED_MODEL_SUBSTRINGS` in `src/config.py`.
 
 ### Other providers
 
@@ -109,7 +110,7 @@ tcode                       # interactive session, rooted at this directory
 tcode "fix the failing test in tests/test_x.py"   # one-shot, prints and exits
 tcode -c                    # continue the last session in this directory
 tcode --sessions            # list saved sessions for this directory
-tcode --model qwen/qwen3.6-27b
+tcode --model openai/gpt-oss-20b
 tcode --quiet "summarize today's log" > answer.txt   # one-shot, clean stdout
 ```
 
@@ -206,7 +207,8 @@ disagreement correctly with no extra logic of its own.
 
 ```bash
 echo "$PROMPT" | tcode --verify --model openai/gpt-oss-120b
-TCODE_VERIFY_MODEL=qwen/qwen3.6-27b tcode --verify "..."   # explicit verifier model
+TCODE_VERIFY_MODEL=openai/gpt-oss-20b tcode --verify "..."  # explicit verifier model
+TCODE_VERIFY_ADVISORY=1 tcode --verify "..."                # always print primary; verdict to stderr
 TCODE_VERIFY_CMD="claude -p --model haiku --allowedTools Read Grep Glob Bash --disallowedTools Edit Write NotebookEdit" \
   tcode --verify "..."                                     # external/cross-provider verifier
 ```

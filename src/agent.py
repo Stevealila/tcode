@@ -491,23 +491,29 @@ def build_agent(cfg: Config) -> Agent:
                     tools=WRITE_TOOLS,
                 )
             ]
-            if cfg.write_scope
+            if cfg.write_scope and not cfg.readonly
             else []
         ),
         # Always on: catches a write whose text mangles a URL a tool result
         # actually returned intact this run. See guardrails.py's UrlLedger
         # and its module docstring for the incident that prompted this
-        # (tcode_improvements.txt's Finding 5).
+        # (tcode_improvements.txt's Finding 5). The write-side check is
+        # skipped in read-only mode — the WRITE_TOOLS it names aren't
+        # registered then, and pydantic_ai warns once per unmatched name.
         ToolGuardrail(result_guard=url_ledger.record),
-        ToolGuardrail(guard=url_ledger.check_write, tools=WRITE_TOOLS),
+        *(
+            [ToolGuardrail(guard=url_ledger.check_write, tools=WRITE_TOOLS)]
+            if not cfg.readonly
+            else []
+        ),
         *(
             [ToolGuardrail(guard=citation_paths_exist(workspace), tools=WRITE_TOOLS)]
-            if cfg.check_citations
+            if cfg.check_citations and not cfg.readonly
             else []
         ),
         *(
             [ToolGuardrail(guard=confidence_tags_need_citation(cfg.require_citation_for), tools=WRITE_TOOLS)]
-            if cfg.require_citation_for
+            if cfg.require_citation_for and not cfg.readonly
             else []
         ),
         # Tuned for Groq's tokens-per-minute budget rather than a generic

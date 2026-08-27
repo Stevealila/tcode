@@ -25,10 +25,10 @@ downstream turn regardless of how good the primary model is. The
 `openai/gpt-oss-20b` needing it (see the model's own case above) — a
 caller opting into a different, presumably-better distillation model wants
 that model's own default reasoning depth, not this one's speed shortcut
-force-fed to it (and, checked against the live API, at least one
-alternative — `qwen/qwen3.6-27b` — rejects `'low'` outright: `` `must be
-one of 'none' or 'default'` ``), so overriding away from `DISTILL_MODEL`
-also drops the forced setting.
+force-fed to it (and it isn't guaranteed to accept `'low'` at all — some
+Groq models reject it outright with `` `must be one of 'none' or
+'default'` ``), so overriding away from `DISTILL_MODEL` also drops the
+forced setting.
 """
 
 from __future__ import annotations
@@ -74,6 +74,6 @@ def make_distill_agent(provider: GroqProvider, model_id: str | None = None) -> A
     # DISTILL_MODEL — see module docstring. An override gets its own default
     # reasoning depth instead, both because that's presumably the point of
     # overriding at all, and because it isn't guaranteed to accept "low"
-    # (qwen/qwen3.6-27b, a real candidate, rejects it outright).
+    # (some Groq models reject that value outright).
     settings = GroqModelSettings(groq_reasoning_effort="low") if is_default else None
     return Agent(model, instructions=DISTILL_INSTRUCTIONS, model_settings=settings)

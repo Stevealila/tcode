@@ -42,7 +42,7 @@ from pydantic_ai import Agent, UsageLimits
 from pydantic_ai.models.groq import GroqModel, GroqModelSettings
 
 from .agent import build_agent
-from .config import Config
+from .config import Config, _reject_banned_model
 from .ratelimit import throttle
 
 # Cheap, fast, low-reasoning — this is a substance-match judgment over two
@@ -70,15 +70,21 @@ mismatch, if they disagree). Nothing else.
 
 
 def _default_verify_model(primary_model: str) -> str:
-    """A model genuinely different from the primary, not just a name.
+    """A second, independent model for the verifier pass.
 
-    qwen3.6-27b is a different architecture/lineage from the gpt-oss
-    family, not just a smaller sibling — picked specifically because a
-    same-family model is more likely to share the same blind spot the
-    verifier exists to catch. Falls back to gpt-oss-120b in the one case
-    where the primary already is qwen.
+    Constrained to Groq's small catalog and to models tcode will actually
+    run: qwen — the previous default — is on config._BANNED_MODEL_SUBSTRINGS
+    after proving unreliable at structured output in real use (raw tool-call
+    envelopes emitted as prose, documented reasoning-effort values rejected,
+    fabricated figures in otherwise-clean output). That leaves the gpt-oss
+    pair. gpt-oss-20b is a genuinely separate checkpoint from the 120b
+    primary — smaller, independently trained — and reliable at the short
+    structured answers this pass compares; when the primary already is 20b,
+    step up to 120b so the two passes are never the identical model.
+    TCODE_VERIFY_MODEL overrides this; TCODE_VERIFY_CMD swaps in a
+    cross-provider verifier entirely.
     """
-    return "openai/gpt-oss-120b" if primary_model == "qwen/qwen3.6-27b" else "qwen/qwen3.6-27b"
+    return "openai/gpt-oss-120b" if primary_model == "openai/gpt-oss-20b" else "openai/gpt-oss-20b"
 
 
 async def _run_external_verifier(cmd: str, prompt: str, timeout: int) -> str:
@@ -118,6 +124,7 @@ async def get_verifier_answer(cfg: Config, prompt: str, usage_limits: UsageLimit
         return await _run_external_verifier(cmd, prompt, timeout)
 
     model = os.environ.get("TCODE_VERIFY_MODEL", "").strip() or _default_verify_model(cfg.model)
+    _reject_banned_model(model, "TCODE_VERIFY_MODEL")
     # provider/provider_api_key pinned back to Groq explicitly, not just
     # left as `cfg`'s — the default verifier is always a second Groq model
     # (see this function's docstring) even when the primary model has moved
