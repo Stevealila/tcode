@@ -36,20 +36,67 @@ Built and run on Linux. It has never been tested or packaged for Windows,
 and the `--sandbox` path is Linux-only by design. macOS is untested but
 likely close; Windows will probably need work.
 
+### Quick start
+
 ```bash
-git clone https://github.com/Stevealila/tcode.git && cd tcode && uv tool install --editable .
+# 1. install the `tcode` command onto your PATH
+uv tool install git+https://github.com/Stevealila/tcode.git
+
+# 2. give it your Groq API key (get one at https://console.groq.com/keys)
+mkdir -p ~/.tcode
+printf 'GROQ_API_KEY=gsk_your_key_here\n' >> ~/.tcode/.env
+
+# 3. run it from any project directory
+cd ~/some/project
+tcode
 ```
 
-This puts a `tcode` command on your `PATH`, usable from **any** directory.
-It operates on whatever directory you launch it from.
+That is the whole setup. Notes:
 
-To upgrade after editing the source, no reinstall is needed (`--editable`
-points straight at this checkout).
+- `uv tool install` builds tcode in its own isolated environment and puts
+  a single `tcode` executable on your `PATH` (`~/.local/bin/tcode` by
+  default). Nothing is left in your current directory and there is no
+  source tree to keep around.
+- The command is usable from **any** directory and operates on whatever
+  directory you launch it from.
+- `~/.tcode/` is tcode's private config and state directory. It does
+  **not** exist until you create it, which is why step 2 runs
+  `mkdir -p` first. `~/.tcode/.env` is the global key file that every
+  project falls back to; see "Configure" below for per-project keys and
+  the other options.
+- Running `tcode` before step 2 is harmless: it prints exactly which
+  `.env` files it looked in and exits.
+
+### Upgrading and uninstalling
+
+```bash
+uv tool upgrade tcode      # pull the latest from GitHub
+uv tool uninstall tcode    # remove the command (leaves ~/.tcode untouched)
+```
+
+### Installing from a local clone (only for hacking on tcode)
+
+You only need a clone if you intend to modify tcode's own source. Install
+it in editable mode:
+
+```bash
+git clone https://github.com/Stevealila/tcode.git
+cd tcode
+uv tool install --editable .
+```
+
+With `--editable`, the installed `tcode` command imports its code
+straight from this checkout on every run, so your edits take effect with
+no reinstall. The trade-off: the command is now bound to this directory.
+If you move, rename, or delete the clone, `tcode` breaks until you
+reinstall. If you only want to *use* tcode, use the Quick start above
+instead.
 
 ## Configure
 
 Put your Groq API key in a `.env` file, either in a specific project
-(`./.env`) or globally (`~/.tcode/.env`) so every project picks it up:
+(`./.env`) or globally (`~/.tcode/.env`, `mkdir -p ~/.tcode` first) so
+every project picks it up:
 
 ```bash
 GROQ_API_KEY=gsk_...
