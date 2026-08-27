@@ -30,6 +30,17 @@ def save_session(cfg: Config, messages: list[ModelMessage]) -> None:
     _prune_archives(cfg.sessions_dir)
 
 
+def clear_session(cfg: Config) -> None:
+    """Drop the 'continue from' pointer so the next `-c` starts fresh.
+
+    Per-turn archives in `sessions_dir` are untouched — `/sessions` still
+    lists them, and `save_session` never overwrites `latest.json` with an
+    empty history (its `if not messages` guard), so without this an
+    in-memory `/clear` would be silently undone by the next `-c`.
+    """
+    cfg.latest_session_file.unlink(missing_ok=True)
+
+
 def _prune_archives(sessions_dir: Path) -> None:
     """Keep only the most recent MAX_SESSION_ARCHIVES turn archives.
 

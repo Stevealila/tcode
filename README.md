@@ -118,7 +118,9 @@ Slash commands inside an interactive session:
 
 - `/help` — list commands
 - `/init` — explore the project and write a `TCODE.md` instruction file for it
-- `/clear` — clear the in-memory conversation (keeps the saved session file until you send another message)
+- `/clear` — start fresh: drop the conversation and the `-c` pointer (per-turn archives stay in `/sessions`)
+- `/context` — show how full the model's context window is (a gauge, the live token count, the compaction thresholds)
+- `/compact [focus]` — summarise the conversation now to reclaim window; an optional `focus` steers what the summary keeps
 - `/memory` — show what's currently in the global memory notebook
 - `/sessions` — list saved sessions for this project
 - `/model` — show the current model and the Groq catalogue (live, with a
@@ -247,7 +249,12 @@ Memory is deliberately **global**, not per-project: it's where the agent
 keeps what it has learned about *you* (conventions you prefer, corrections
 you've given it), so that carries into every project. Conversation history
 and step logs are per-project, so switching directories switches context
-the way switching repos should.
+the way switching repos should. `TCODE_MEMORY=0` omits the notebook
+entirely (no `write_memory`/`read_memory`, nothing injected) — right for a
+short headless run with no durable facts to keep, and one that a weak model
+would otherwise pollute by pasting its own injected context back in. When
+memory *is* on, a guardrail (`memory_write_is_sane`) blocks exactly that
+paste-back and over-long dumps.
 
 Separately, tcode also auto-loads Markdown instruction files as static
 context. Its own file is `TCODE.md` — the tcode counterpart to Claude
@@ -348,34 +355,42 @@ pass along noise for the (weaker, more confident) main model to run with.
 
 ## Rate limits & context management
 
-Groq's free tier is tight: 8,000 tokens/minute and 30 requests/minute for
-`openai/gpt-oss-120b` (and gpt-oss-20b; switching models doesn't buy more
-TPM. `llama-3.1-8b-instant` is actually lower, at 6,000). Three things keep
-a session working within that:
+Two different limits get called "context" and tcode keeps them apart:
 
-- **`ToolOutputLimits`** caps any single tool result (a big `ls -R`, a
-  large file `cat`) as it enters the conversation. `TCODE_TOOL_OUTPUT_LIMIT`
-  (default 2000 characters).
-- **`ClearToolResults`** prunes older tool results once the conversation
-  has grown past a token budget, keeping the last few intact.
-  `TCODE_CLEAR_AFTER_TOKENS` (default 3000) and `TCODE_KEEP_TOOL_PAIRS`
-  (default 3).
-- **A client-side RPM throttle** (`TCODE_MAX_RPM`, default 30, shared
+- the model's context **window** — a hard per-request size ceiling
+  (`openai/gpt-oss-*` on Groq is 131K). Exceeding it is a hard error.
+- Groq's tokens-per-**minute** rate limit — a throughput ceiling over time,
+  handled by the **RPM throttle** (`TCODE_MAX_RPM`, default 30, shared
   across every `tcode` process via `~/.tcode/rpm_state` since Groq enforces
-  this per account, not per process) waits out the window instead of
-  firing a request that's just going to get a 429.
+  it per account). Groq also caches the system prompt and tool schemas
+  server-side, so repeat turns re-pay only for new content.
 
-Groq seems to cache the system prompt and tool schemas server-side; repeat
-turns showed most `input_tokens` coming back as `cache_read_tokens`, which
-don't count against the TPM budget. The real pressure is the new content
-each turn (conversation growth, tool output), which is what the two
-compaction knobs above target. `ClearToolResults` rewriting old content
-does invalidate the cache from that point on, so the turn it fires on pays
-full price once.
+The compaction pipeline (`src/context.py`) targets the *window*, on a
+**fraction** of it resolved per request — so it stays correct after a
+`/model` switch to any size of model. Cheapest first, escalating only as far
+as it must:
 
-If you're on a higher tier, raise or disable these (`TCODE_MAX_RPM=0`,
-larger `TCODE_CLEAR_AFTER_TOKENS`). The defaults are tuned for the free
-tier, not a hard ceiling.
+- **`ToolOutputLimits`** head/tail-truncates any single tool result over
+  `TCODE_TOOL_OUTPUT_LIMIT` characters (default 8000) as it enters history.
+- **`ClampOversizedMessages`** truncates one runaway message part (a giant
+  tool call emitted as text) — `TCODE_MAX_PART_TOKENS` (default 24000).
+- **`DeduplicateFileReads`** blanks a file read superseded by an identical
+  later read of the same range. Near-lossless, every request.
+- **`ClearToolResults`** blanks older tool results once history passes
+  `TCODE_CONTEXT_COMPACT_FRACTION` of the window (default 0.80), keeping the
+  last `TCODE_KEEP_TOOL_PAIRS` (default 6).
+- **`SummarizingCompaction`** — only if clearing wasn't enough: older turns
+  summarised by a small Groq model (`openai/gpt-oss-20b`), the last
+  `TCODE_CONTEXT_KEEP_MESSAGES` (default 12) and user turns kept verbatim.
+
+`WarnNearLimits` tells the model to wrap up near
+`TCODE_CONTEXT_WARN_FRACTION` (default 0.92). `/context` shows how full the
+window is; `/compact [focus]` summarises now; `/clear` starts fresh.
+
+Set `TCODE_CONTEXT_WINDOW` for a model genai-prices doesn't have a window
+for (some google/zai ids) — otherwise it falls back to a 200K assumption.
+All fractions floor at 0.25 (below that, fixed overhead alone exceeds the
+target and compaction just thrashes).
 
 tcode's system prompt deliberately does **not** encourage the model to run
 independent tool calls in parallel, unlike some other coding agents. On a
@@ -488,6 +503,7 @@ Everything is one file each in `src/`:
 
 - `config.py` — `.env` loading, on-disk layout
 - `models.py` — the Groq model catalogue lookup behind `/model`
+- `context.py` — the compaction pipeline + the `/context` / `/compact` helpers
 - `agent.py` — which harness capabilities are wired in
 - `web.py` — the web search/fetch tools (see "Web search" above)
 - `files.py` / `distill.py` — the large-file distillation tool and its

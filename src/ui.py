@@ -6,6 +6,7 @@ import contextlib
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich import box
 from rich.console import Console
@@ -16,6 +17,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .config import Config
+
+if TYPE_CHECKING:
+    from .context import ContextReport
 
 # Claude Code's signature accent — a warm coral used for the welcome mark,
 # the assistant-turn bullet, and tool-call markers, so tcode's terminal
@@ -70,10 +74,12 @@ def _out(quiet: bool) -> Console:
 _HELP_ROWS = [
     ("/help", "show this help"),
     ("/init", "scan the project and write a TCODE.md instruction file"),
-    ("/clear", "clear the conversation in this session"),
+    ("/clear", "start fresh — drop the conversation (archives are kept)"),
     ("/memory", "show the global memory notebook"),
     ("/sessions", "list saved sessions for this project"),
     ("/model [id]", "show or switch the model for this session (fuzzy match ok)"),
+    ("/context", "show how full the model's context window is"),
+    ("/compact [focus]", "summarize the conversation now to reclaim context"),
     ("/skills", "list skills in ~/.tcode/skills"),
     ("/skill <name>", "load a skill, added to your next message"),
     ("/exit", "leave (also: /quit, Ctrl-D)"),
@@ -263,6 +269,9 @@ def render_usage(cost: object, total_tokens: int, elapsed: float, *, quiet: bool
 
 
 def show_memory(cfg: Config) -> None:
+    if not cfg.memory_enabled:
+        console.print("[dim]memory is off for this session (TCODE_MEMORY=0)[/dim]")
+        return
     files = sorted(cfg.memory_dir.glob("**/*.md"))
     if not files:
         console.print("[dim]memory notebook is empty[/dim]")
@@ -378,6 +387,32 @@ def show_models(cfg: Config, catalogue: list[str], error: str | None = None) -> 
         console.print(f"  {mark} {escape(m)}")
     console.print("[dim]switch:  /model <id>  — fuzzy match ok (e.g. /model 20b)[/dim]")
     console.print("[dim]other backends:  /model google:<id>  ·  /model zai:<id>[/dim]")
+    console.print()
+
+
+def show_context(report: ContextReport) -> None:
+    """Render the /context gauge."""
+    pct = report.fraction
+    filled = max(0, min(30, round(pct * 30)))
+    colour = "green" if pct < report.compact_fraction else ("yellow" if pct < report.warn_fraction else "red")
+    bar = f"[{colour}]{'█' * filled}[/{colour}][dim]{'░' * (30 - filled)}[/dim]"
+
+    console.print(
+        f"[bold]context[/bold]  [{ACCENT}]{escape(report.model_label)}[/{ACCENT}]"
+        f"   [dim]window {report.window_tokens:,} tokens"
+        f"{'' if report.resolved else ' (estimated — model not in the pricing registry)'}[/dim]"
+    )
+    console.print(f"  {bar}  [bold]{pct:.0%}[/bold]   [dim]~{report.used_tokens:,} / {report.window_tokens:,}[/dim]")
+    if not report.live:
+        console.print("  [dim]history-only estimate — run a turn for the exact figure (adds tools + system prompt)[/dim]")
+    console.print(
+        f"  [dim]{report.message_count} message(s), {report.tool_result_count} tool result(s) in the conversation[/dim]"
+    )
+    console.print(
+        f"  [dim]auto-compacts at {report.compact_fraction:.0%}"
+        f" · warns the model at {report.warn_fraction:.0%}"
+        f" · /compact to summarize now · /clear to start fresh[/dim]"
+    )
     console.print()
 
 

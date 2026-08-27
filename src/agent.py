@@ -3,15 +3,12 @@ another provider — see _build_model) plus harness capabilities.
 
 This hand-assembles the same pieces `pydantic_ai_harness.Coder` composes
 (FileSystem, Shell, RepoContext, Planning, a read-only explorer sub-agent,
-plus context management) instead of using `Coder` as one opaque block.
-Coder's built-in `ClearToolResults`/`ToolOutputLimits`/`WarnNearLimits` are
-tuned for a generic ~200k-token context window, but Groq's lower tiers cap
-throughput at a few thousand *tokens per minute*, a much tighter and
-unrelated constraint. Reusing Coder as-is means those safety nets barely
-ever fire before Groq's rate limiter does. Instantiating our own copies of
-those three capabilities alongside Coder doesn't work either: Coder already
-registers a `read_tool_result` tool via its internal ToolOutputLimits, and a
-second instance collides with it.
+plus context management) instead of using `Coder` as one opaque block, so
+tcode owns the exact compaction ladder (see context.py) rather than
+inheriting Coder's. Instantiating our own copies of those capabilities
+alongside Coder doesn't work either: Coder already registers a
+`read_tool_result` tool via its internal ToolOutputLimits, and a second
+instance collides with it.
 
 Memory gives the model a persistent cross-project notebook. Step
 persistence is best-effort, not load-bearing, so a version mismatch in the
@@ -39,8 +36,8 @@ from pydantic_ai.models.groq import GroqModel, GroqModelSettings
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness import (
-    FileSystem,
     LLM_API_KEY_ENV_PATTERNS,
+    FileSystem,
     Memory,
     Planning,
     RepoContext,
@@ -48,25 +45,26 @@ from pydantic_ai_harness import (
     SubAgent,
     SubAgents,
 )
-from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.guardrails import ToolGuardrail
 from pydantic_ai_harness.memory import FileStore
 from pydantic_ai_harness.subagents import ModelOption
 from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
 from .config import GLOBAL_DIR, Config
+from .context import compaction_capabilities
 from .files import file_capabilities
 from .guardrails import (
+    MEMORY_TOOLS,
     WRITE_TOOLS,
     UrlLedger,
     citation_paths_exist,
     confidence_tags_need_citation,
+    memory_write_is_sane,
     scope_shell_exploration,
     scope_writes_to,
 )
 from .model_quirks import normalize_tool_namespaces
 from .web import current_time_instructions, web_capabilities
-
 
 # Instruction filenames RepoContext autoloads, in within-directory precedence
 # order — LAST wins, because RepoContext renders a directory's files in this
@@ -516,10 +514,14 @@ def build_agent(cfg: Config) -> Agent:
             if cfg.require_citation_for and not cfg.readonly
             else []
         ),
-        # Tuned for Groq's tokens-per-minute budget rather than a generic
-        # large context window; see module docstring.
-        ClearToolResults(max_tokens=cfg.clear_after_tokens, keep_pairs=cfg.keep_tool_pairs),
-        WarnNearLimits(max_total_tokens=cfg.clear_after_tokens * 2),
+        *(
+            [ToolGuardrail(guard=memory_write_is_sane(cfg.memory_dir), tools=MEMORY_TOOLS)]
+            if cfg.memory_enabled
+            else []
+        ),
+        # One runaway tool result kept from dominating a single request. The
+        # aggregate — history growth across turns — is the compaction
+        # pipeline's job (fraction-of-window triggers), added just below.
         ToolOutputLimits(
             bands=[
                 Band(
@@ -528,7 +530,11 @@ def build_agent(cfg: Config) -> Agent:
                 )
             ]
         ),
-        Memory(FileStore(str(cfg.memory_dir))),
+        # Clamp / dedupe / clear / summarise, triggered on a fraction of the
+        # model's real context window, plus the /context gauge and a
+        # wrap-up warning. See context.py's module docstring.
+        *compaction_capabilities(cfg),
+        *([Memory(FileStore(str(cfg.memory_dir)))] if cfg.memory_enabled else []),
     ]
 
     try:

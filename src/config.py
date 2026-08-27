@@ -16,13 +16,32 @@ from dotenv import load_dotenv
 
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 DEFAULT_REQUEST_LIMIT = 50
-DEFAULT_TOOL_OUTPUT_MAX_CHARS = 2000
-DEFAULT_KEEP_TOOL_PAIRS = 3
-DEFAULT_CLEAR_AFTER_TOKENS = 3000
+# A single tool return over this many characters is head/tail-truncated as it
+# enters history (a runaway `ls -R`, a whole-file `cat`). Generous by design:
+# the aggregate is the compaction pipeline's job (see context.py), this only
+# stops one call from dominating a single request.
+DEFAULT_TOOL_OUTPUT_MAX_CHARS = 8000
+# How many recent tool-call/result pairs ClearToolResults keeps in full when
+# it fires; older ones are blanked (re-fetchable on demand).
+DEFAULT_KEEP_TOOL_PAIRS = 6
+# Compaction runs once the estimated history reaches this fraction of the
+# model's real context window; summarization only if clearing tool results
+# first isn't enough to get back under it. A fraction, not an absolute token
+# count, so it stays correct across a /model switch to any size of model.
+DEFAULT_CONTEXT_COMPACT_FRACTION = 0.80
+# The model is told (an injected note) to wrap up as it nears this fraction.
+DEFAULT_CONTEXT_WARN_FRACTION = 0.92
+# Recent messages SummarizingCompaction keeps verbatim past the summary.
+DEFAULT_CONTEXT_KEEP_MESSAGES = 12
+# A single message part (response text, tool-call args) larger than this many
+# estimated tokens is clamped in place — the "model printed a giant tool
+# call as text" failure that nothing else in the pipeline can reach.
+DEFAULT_MAX_PART_TOKENS = 24000
 DEFAULT_MAX_RPM = 30
 DEFAULT_WEB_SEARCH = True
 DEFAULT_SHELL = True
 DEFAULT_READONLY = False
+DEFAULT_MEMORY = True
 
 GLOBAL_DIR = Path.home() / ".tcode"
 
@@ -217,9 +236,18 @@ class Config:
     # Applied as GroqModelSettings(groq_reasoning_effort=...) in build_agent;
     # a no-op on providers that don't expose the knob (google/zai) for now.
     effort: str | None
+    memory_enabled: bool
     tool_output_max_chars: int
     keep_tool_pairs: int
-    clear_after_tokens: int
+    # Context-window management — see context.py. All fractions are of the
+    # model's real window, resolved per request, so they survive a /model
+    # switch. context_window_override forces the window for a model
+    # genai-prices doesn't know (some google/zai ids); None = resolve it.
+    context_compact_fraction: float
+    context_warn_fraction: float
+    context_keep_messages: int
+    context_max_part_tokens: int
+    context_window_override: int | None
     max_rpm: int
     groq_max_rpm: int
     web_search: bool
@@ -329,23 +357,63 @@ def load_config(
     raw_readonly = os.environ.get("TCODE_READONLY", "").strip().lower()
     readonly = raw_readonly not in ("", "0", "false", "no") if raw_readonly else DEFAULT_READONLY
 
+    # The global cross-project memory notebook (~/.tcode/memory). On by
+    # default. TCODE_MEMORY=0 omits the capability entirely — no
+    # write_memory/read_memory tools, nothing injected — for a short,
+    # repeated, headless run that has no durable facts worth carrying
+    # between sessions and, with a weak model, tends to dump its own
+    # injected context back into the notebook instead.
+    raw_memory = os.environ.get("TCODE_MEMORY", "").strip().lower()
+    memory_enabled = raw_memory not in ("0", "false", "no") if raw_memory else DEFAULT_MEMORY
+
     # Set by sandbox.py on the process it re-execs into a bubblewrap/firejail
     # jail; absent in a normal run. Purely informational here (the banner).
     sandboxed = os.environ.get("TCODE_SANDBOX_ACTIVE") == "1"
 
-    # Groq's lower tiers cap throughput at a few thousand tokens per minute,
-    # so a single unbounded tool result (e.g. `ls -R` on a real repo) can
-    # blow the whole request budget on its own, and a growing conversation
-    # compounds it turn over turn. These two keep both in check: cap any one
-    # tool's output as it enters history, then prune old tool results once
-    # the conversation has grown past a few turns.
+    # Context-window management — see context.py's module docstring for the
+    # two-limits distinction (window size vs. Groq's tokens-per-minute rate
+    # limit, which is ratelimit.throttle()'s job, not this). `ls -R` on a
+    # real repo still gets capped as it enters history; the aggregate is
+    # handled by fraction-of-window triggers now, not a flat token count.
     tool_output_max_chars = int(
         os.environ.get("TCODE_TOOL_OUTPUT_LIMIT", DEFAULT_TOOL_OUTPUT_MAX_CHARS)
     )
     keep_tool_pairs = int(os.environ.get("TCODE_KEEP_TOOL_PAIRS", DEFAULT_KEEP_TOOL_PAIRS))
-    clear_after_tokens = int(
-        os.environ.get("TCODE_CLEAR_AFTER_TOKENS", DEFAULT_CLEAR_AFTER_TOKENS)
+
+    def _fraction(env: str, default: float) -> float:
+        raw = os.environ.get(env, "").strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError as e:
+            raise ConfigError(f"{env}={raw!r} is not a number.") from e
+        # Floored at 0.25: below that, the fixed overhead (system prompt,
+        # tool schemas, the minimum keep window) already exceeds the target,
+        # so compaction can never get under it and just re-summarizes every
+        # turn — burning the request budget and wiping the model's memory of
+        # what it just did.
+        if not 0.25 <= value <= 1.0:
+            raise ConfigError(
+                f"{env}={raw!r} must be a fraction of the context window between 0.25 and 1.0."
+            )
+        return value
+
+    context_compact_fraction = _fraction("TCODE_CONTEXT_COMPACT_FRACTION", DEFAULT_CONTEXT_COMPACT_FRACTION)
+    context_warn_fraction = _fraction("TCODE_CONTEXT_WARN_FRACTION", DEFAULT_CONTEXT_WARN_FRACTION)
+    context_keep_messages = int(
+        os.environ.get("TCODE_CONTEXT_KEEP_MESSAGES", DEFAULT_CONTEXT_KEEP_MESSAGES)
     )
+    context_max_part_tokens = int(os.environ.get("TCODE_MAX_PART_TOKENS", DEFAULT_MAX_PART_TOKENS))
+    raw_window = os.environ.get("TCODE_CONTEXT_WINDOW", "").strip()
+    context_window_override: int | None = None
+    if raw_window:
+        try:
+            context_window_override = int(raw_window)
+        except ValueError as e:
+            raise ConfigError(f"TCODE_CONTEXT_WINDOW={raw_window!r} is not an integer.") from e
+        if context_window_override < 1:
+            raise ConfigError("TCODE_CONTEXT_WINDOW must be a positive token count.")
 
     # Requests-per-minute is a separate, harder limit from tokens-per-minute,
     # and each provider enforces it per account, not per process — the
@@ -489,9 +557,14 @@ def load_config(
         readonly=readonly,
         sandboxed=sandboxed,
         effort=effort,
+        memory_enabled=memory_enabled,
         tool_output_max_chars=tool_output_max_chars,
         keep_tool_pairs=keep_tool_pairs,
-        clear_after_tokens=clear_after_tokens,
+        context_compact_fraction=context_compact_fraction,
+        context_warn_fraction=context_warn_fraction,
+        context_keep_messages=context_keep_messages,
+        context_max_part_tokens=context_max_part_tokens,
+        context_window_override=context_window_override,
         max_rpm=max_rpm,
         groq_max_rpm=groq_max_rpm,
         web_search=web_search,

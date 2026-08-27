@@ -49,6 +49,13 @@ technical teeth:
   tag list) rather than hardcoding one caller's own tagging vocabulary —
   most tcode tasks don't tag confidence at all, so this only exists once a
   caller's own prompt asks for and defines that convention.
+- `memory_write_is_sane` rejects a `write_memory` *append* that carries an
+  injected-context marker (`### MEMORY.md`, `<memory>`, …), runs far longer
+  than one durable fact, or re-appends text already in the notebook. Always
+  on when the Memory capability is (`TCODE_MEMORY`): a weak model on a
+  repeated headless task was observed pasting its whole rendered notebook
+  back into itself every run until MEMORY.md was a wall of triplicated
+  entries.
 """
 
 from __future__ import annotations
@@ -258,6 +265,77 @@ def citation_paths_exist(workspace: str | Path):
             "actually read this run — remove the citation or fix the path "
             "instead of leaving a reference to something that isn't there."
         )
+
+    return guard
+
+
+MEMORY_TOOLS = ("write_memory",)
+"""The Memory capability's write tool — see `memory_write_is_sane`."""
+
+# Markers that only ever appear in the memory context injected into the
+# prompt, never in a legitimate hand-written durable fact. A write_memory
+# call carrying one is the model pasting its own injected context back into
+# the notebook — the exponential-duplication failure this guard exists for.
+_MEMORY_INJECTION_MARKERS = (
+    "### MEMORY.md",
+    "### Other memory files",
+    "<memory>",
+    "</memory>",
+    "[notebook exceeds",
+    "use read_memory(",
+)
+# A single durable fact is a sentence or two. Well past that and it's a
+# paste, not a fact worth keeping verbatim forever.
+_MEMORY_FACT_MAX_CHARS = 1200
+
+
+def memory_write_is_sane(memory_dir: Path):
+    """Build a guard rejecting a `write_memory` *append* that is really the
+    model dumping its injected memory context back into the notebook.
+
+    Observed in production (a weak model on a repeated headless task): every
+    run it appended the entire rendered `### MEMORY.md` block — header and
+    all — to the file, so the notebook grew a full copy of itself each time
+    until it was an unreadable wall of triplicated entries.
+
+    Only the append path is guarded. A correction/removal (`old_text` set)
+    is always allowed — that's how the notebook gets curated, including
+    cleaning up a mess this guard didn't catch in time.
+    """
+    main_file = Path(memory_dir) / "main" / "MEMORY.md"
+
+    def guard(call: ToolCallInfo) -> GuardrailResult:
+        if str(call.args.get("old_text") or "").strip():
+            return GuardrailResult.allow()
+        content = str(call.args.get("content", ""))
+        stripped = content.strip()
+        if not stripped:
+            return GuardrailResult.allow()
+
+        marker = next((m for m in _MEMORY_INJECTION_MARKERS if m in content), None)
+        if marker is not None:
+            return GuardrailResult.retry(
+                f"That write_memory content contains {marker!r}, which only appears in the "
+                "memory context you were shown — you're about to paste your own notebook back "
+                "into itself. Write ONLY the new durable fact as a short bullet line, or pass "
+                "`old_text` to correct an existing entry."
+            )
+        if len(stripped) > _MEMORY_FACT_MAX_CHARS:
+            return GuardrailResult.retry(
+                f"That write_memory content is {len(stripped)} characters — far more than one "
+                "durable fact. Append a short bullet (a sentence or two), not a transcript or "
+                "a dump of context."
+            )
+        try:
+            existing = main_file.read_text()
+        except OSError:
+            existing = ""
+        if stripped in existing:
+            return GuardrailResult.retry(
+                "That exact text is already in MEMORY.md — appending it again just duplicates "
+                "it. Skip the write, or pass `old_text` to update the existing entry."
+            )
+        return GuardrailResult.allow()
 
     return guard
 

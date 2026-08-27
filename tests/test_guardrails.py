@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic_ai_harness.guardrails import ToolCallInfo, ToolResultInfo
 
 from src.guardrails import (
     _is_curl_or_wget_fetch,
@@ -15,11 +16,11 @@ from src.guardrails import (
     _write_text,
     citation_paths_exist,
     confidence_tags_need_citation,
+    memory_write_is_sane,
     prefer_web_fetch_tool,
     scope_shell_exploration,
     scope_writes_to,
 )
-from pydantic_ai_harness.guardrails import ToolCallInfo, ToolResultInfo
 
 
 def _call(name: str, **args) -> ToolCallInfo:
@@ -228,3 +229,48 @@ class TestConfidenceTagsNeedCitation:
             )
         )
         assert result.action == "retry"
+
+
+class TestMemoryWriteIsSane:
+    def _guard(self, tmp_path, existing: str = ""):
+        main = tmp_path / "main" / "MEMORY.md"
+        main.parent.mkdir(parents=True, exist_ok=True)
+        if existing:
+            main.write_text(existing)
+        return memory_write_is_sane(tmp_path)
+
+    def test_allows_a_normal_short_fact(self, tmp_path):
+        g = self._guard(tmp_path)
+        r = g(_call("write_memory", content="- The build command is `uv run pytest`."))
+        assert r.action == "allow"
+
+    def test_rejects_injected_context_marker(self, tmp_path):
+        g = self._guard(tmp_path)
+        pasted = "### MEMORY.md\n\n- some old fact\n- another old fact"
+        r = g(_call("write_memory", content=pasted))
+        assert r.action == "retry"
+
+    def test_rejects_memory_tag_wrapper(self, tmp_path):
+        g = self._guard(tmp_path)
+        r = g(_call("write_memory", content="<memory>\n- x\n</memory>"))
+        assert r.action == "retry"
+
+    def test_rejects_oversized_dump(self, tmp_path):
+        g = self._guard(tmp_path)
+        r = g(_call("write_memory", content="fact. " * 400))
+        assert r.action == "retry"
+
+    def test_rejects_exact_re_append(self, tmp_path):
+        g = self._guard(tmp_path, existing="- already recorded fact\n")
+        r = g(_call("write_memory", content="- already recorded fact"))
+        assert r.action == "retry"
+
+    def test_allows_a_correction_even_if_it_would_trip_a_rule(self, tmp_path):
+        # old_text set => surgical edit => always allowed (that's how a mess gets cleaned)
+        g = self._guard(tmp_path, existing="### MEMORY.md\n- junk\n")
+        r = g(_call("write_memory", content="### MEMORY.md\n- junk\n- fixed", old_text="### MEMORY.md\n- junk\n"))
+        assert r.action == "allow"
+
+    def test_empty_content_is_left_to_the_tool(self, tmp_path):
+        g = self._guard(tmp_path)
+        assert g(_call("write_memory", content="")).action == "allow"

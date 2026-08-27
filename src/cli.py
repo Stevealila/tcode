@@ -25,7 +25,13 @@ from .config import _PROVIDER_API_KEY_ENV, Config, ConfigError, _rpm_for, load_c
 from .config import parse_model_spec as _parse_model_spec
 from .guardrails import citation_paths_exist, confidence_tags_need_citation
 from .runner import run_turn
-from .sessions import list_sessions, load_archive, load_latest_session, save_session
+from .sessions import (
+    clear_session,
+    list_sessions,
+    load_archive,
+    load_latest_session,
+    save_session,
+)
 from .skills import list_skills, load_skill
 from .telemetry import load_smell_log
 
@@ -433,6 +439,53 @@ def _model_command(cfg: Config, agent: object, arg: str) -> object:
     return new_agent
 
 
+def _clear_command(cfg: Config, message_history: list[ModelMessage]) -> list[ModelMessage]:
+    """`/clear` — drop the conversation and the `-c` pointer. Returns the new
+    (empty) history. Per-turn archives in /sessions are untouched."""
+    from . import context as _context
+
+    report = _context.describe_context(cfg, message_history)
+    clear_session(cfg)
+    _context.GAUGE.reset()
+    if report.message_count:
+        ui.print_notice(
+            f"cleared {report.message_count} message(s) (~{report.used_tokens:,} tokens) "
+            "— past turns are still in /sessions"
+        )
+    else:
+        ui.print_notice("conversation already empty")
+    return []
+
+
+async def _compact_command(
+    cfg: Config, message_history: list[ModelMessage], focus: str | None
+) -> list[ModelMessage]:
+    """`/compact [focus]` — summarize the conversation now. Returns the new
+    history (unchanged on failure or when already compact)."""
+    from . import context as _context
+
+    if not message_history:
+        ui.print_notice("nothing to compact yet")
+        return message_history
+    ui.print_notice("compacting…")
+    try:
+        new_history, res = await _context.compact_history(cfg, message_history, focus=focus)
+    except Exception as e:  # noqa: BLE001 - keep the REPL alive on a compaction failure
+        ui.print_error(f"compaction failed: {_friendly_error(e)}")
+        return message_history
+    if not res.changed:
+        ui.print_notice(
+            f"already compact — {res.messages_before} message(s), nothing older than the keep window"
+        )
+        return new_history
+    save_session(cfg, new_history)
+    ui.print_notice(
+        f"compacted: {res.messages_before} → {res.messages_after} messages, "
+        f"~{res.tokens_before:,} → ~{res.tokens_after:,} tokens"
+    )
+    return new_history
+
+
 _INIT_PROMPT = """\
 Create a file named TCODE.md in the current directory: the project's
 instruction file for a coding agent (tcode's equivalent of CLAUDE.md /
@@ -491,8 +544,17 @@ async def interactive(cfg: Config, message_history: list[ModelMessage]) -> None:
             ui.print_help()
             continue
         if user_input == "/clear":
-            message_history = []
-            ui.print_notice("conversation cleared")
+            message_history = _clear_command(cfg, message_history)
+            continue
+        if user_input == "/context":
+            from . import context as _context
+
+            ui.show_context(_context.describe_context(cfg, message_history))
+            continue
+        if user_input == "/compact" or user_input.startswith("/compact "):
+            message_history = await _compact_command(
+                cfg, message_history, user_input.partition(" ")[2].strip() or None
+            )
             continue
         if user_input == "/memory":
             ui.show_memory(cfg)
@@ -678,13 +740,13 @@ async def reduce_mode(
 
 # A harness capability that injects a pseudo-user turn tags it with a
 # bracketed name at the very start of the text — `[WarnNearLimits]`,
-# `[LimitWarner]`, `[ClearToolResults]`, etc. WarnNearLimits in particular
-# fires on almost every non-trivial run at tcode's token budgets
-# (clear_after_tokens ~3000, warn at 2x), so without this filter a large
-# share of archived sessions would have _last_user_prompt return the
-# warning text and --backtest would replay *that* as the task. Pinned /
-# receipt parts use list-typed content and are already excluded by the
-# `isinstance(part.content, str)` check below.
+# `[LimitWarner]`, `[ClearToolResults]`, etc. WarnNearLimits fires only near
+# `context_warn_fraction` of the window now (see context.py), so this is
+# rare — but an archived session that hit it would still have
+# _last_user_prompt return the warning text and --backtest replay *that* as
+# the task without this filter. Pinned / receipt parts use list-typed
+# content and are already excluded by the `isinstance(part.content, str)`
+# check below.
 _SYNTHETIC_USER_PART = re.compile(r"^\s*\[[A-Za-z][\w -]*\]")
 
 
