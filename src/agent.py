@@ -35,7 +35,7 @@ from pathlib import Path
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import Capability
-from pydantic_ai.models.groq import GroqModel
+from pydantic_ai.models.groq import GroqModel, GroqModelSettings
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness import (
@@ -329,6 +329,22 @@ def _expert_models_menu(cfg: Config) -> dict[str, ModelOption] | None:
     }
 
 
+def _primary_model_settings(cfg: Config) -> ModelSettings | None:
+    """Reasoning-effort for the primary turn (--effort / --think / TCODE_EFFORT).
+
+    Groq's gpt-oss models take `groq_reasoning_effort` directly. Other
+    providers expose the knob differently (google_thinking_config,
+    openai_reasoning_effort); until those are wired, `--effort` is a
+    documented no-op there rather than an error — the CLI still accepts it
+    so a multi-provider script doesn't have to special-case.
+    """
+    if cfg.effort is None:
+        return None
+    if cfg.provider == "groq":
+        return GroqModelSettings(groq_reasoning_effort=cfg.effort)
+    return None
+
+
 def build_agent(cfg: Config) -> Agent:
     model = _build_model(cfg)
     # file_capabilities/web_capabilities' own internal distillation agents
@@ -465,6 +481,7 @@ def build_agent(cfg: Config) -> Agent:
 
     return Agent(
         model,
+        model_settings=_primary_model_settings(cfg),
         capabilities=capabilities,
         # Pydantic AI's default tool-retry budget is 1, counted per tool name
         # for the whole run (not per call): a second ModelRetry from the same

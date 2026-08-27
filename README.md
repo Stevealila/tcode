@@ -89,6 +89,18 @@ to it instead, at a higher reasoning effort. Unset (the default), the
 `model` argument doesn't exist at all and every delegation behaves exactly
 as before — this is opt-in, not a second model client running by default.
 
+### Reasoning effort for the main loop
+
+`--effort {low,medium,high}` (or `--think`, shorthand for `--effort high`,
+or `TCODE_EFFORT`) sets the reasoning effort of the primary model for that
+run — a per-task knob: dial it up for a hard problem, leave it off for a
+lookup. This is separate from `TCODE_EXPERT_MODEL` above, which only
+affects sub-agent delegations; `--effort` affects the main loop itself.
+More effort means deeper reasoning but more tokens and more wall-clock for
+the same work. Currently applied on Groq models
+(`groq_reasoning_effort`); a no-op on other providers until their
+equivalent knobs are wired.
+
 ## Use
 
 ```bash
@@ -268,6 +280,16 @@ pointing tcode at genuinely untrusted content, use `TCODE_SHELL=0` or
 `TCODE_WRITE_SCOPE` above, or run tcode inside a container or a
 bubblewrap/firejail wrapper for an actual OS-level boundary — none of this
 guardrail layer is a substitute for one.
+
+For the last of those, `--sandbox` (or `TCODE_SANDBOX=1`) is a built-in
+version: on Linux, tcode re-execs itself inside `bwrap` (preferred) or
+`firejail` with only the workspace and `~/.tcode` writable and the rest of
+the filesystem read-only, so a write outside those trees fails in the
+kernel no matter what the model was talked into. It's a no-op with a
+warning on non-Linux or when neither tool is installed. Network stays
+reachable — the model API needs it — so this contains filesystem writes,
+not exfiltration; `TCODE_SHELL=0` is still the right choice when the
+content itself is untrusted.
 
 ## Web search
 

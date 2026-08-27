@@ -12,7 +12,7 @@ import sys
 import time
 from collections import Counter
 
-from pydantic_ai import Agent, UnexpectedModelBehavior, UsageLimits
+from pydantic_ai import Agent, UnexpectedModelBehavior, UsageLimitExceeded, UsageLimits
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -47,6 +47,17 @@ _FAKE_TOOL_CALL_PREFIX = re.compile(r'^\{\s*"name"\s*:\s*"[a-zA-Z_][a-zA-Z0-9_]*
 
 def _looks_like_faked_tool_call(text: str) -> bool:
     return bool(_FAKE_TOOL_CALL_PREFIX.match(text.strip()))
+
+
+def _classify_exception(e: BaseException) -> str:
+    """A short slug for a turn-ending exception, stored on the smell
+    record's `outcome` field so --backtest can tell a run that looped into
+    the request limit apart from one that crashed on a garbled tool call."""
+    if isinstance(e, UsageLimitExceeded):
+        return "usage_limit"
+    if isinstance(e, UnexpectedModelBehavior):
+        return "model_behavior_error"
+    return "error"
 
 
 def _skipped_reading_files(tool_names: Counter[str], final_text: str) -> bool:
@@ -98,10 +109,31 @@ async def run_turn(
     quiet = quiet or capture
     start = time.monotonic()
 
+    attempt = 0
+    result = None
+    final_text_parts: list[str] = []
+    tool_names: Counter[str] = Counter()
+    outcome = "ok"
+    error: str | None = None
+
+    def _finalize() -> None:
+        """Render the usage footer and write the smell record — exactly
+        once, on whichever path the turn exits by (success, salvage,
+        raise). record_smell must see the failing runs too; they're the
+        whole point of the telemetry. See betterment/plan.txt 6.2 D1."""
+        elapsed = time.monotonic() - start
+        usage = getattr(result, "usage", None)
+        if usage is not None:
+            ui.render_usage(usage.cost, usage.total_tokens, elapsed, quiet=quiet)
+        record_smell(
+            cfg, prompt, dict(tool_names), attempt, elapsed, usage,
+            outcome=outcome, error=error,
+        )
+
     for attempt in range(_MAX_EMPTY_TURN_RETRIES + 1):
         streaming_text = False
-        final_text_parts: list[str] = []
-        tool_names: Counter[str] = Counter()
+        final_text_parts = []
+        tool_names = Counter()
 
         try:
             async with agent.iter(
@@ -187,6 +219,7 @@ async def run_turn(
                 # sometimes a truncated-but-genuine write_file payload (see
                 # --write's recovery of this exact shape), so discarding it
                 # outright would lose more than flagging it loudly does.
+                outcome = "faked_tool_call"
                 ui.print_notice(
                     "note: the model printed a tool call as text instead of "
                     "actually making it, and kept doing so through "
@@ -204,6 +237,8 @@ async def run_turn(
             # to a last-step formatting failure.
             final_text = "".join(final_text_parts)
             if final_text.strip():
+                outcome = "salvaged_after_tool_failure"
+                error = str(e)
                 ui.print_notice(
                     f"note: the model's own tool call failed after this "
                     f"answer was already produced ({e}) — returning the "
@@ -211,9 +246,13 @@ async def run_turn(
                     "a tool.",
                     quiet=quiet,
                 )
+                _finalize()
                 return message_history, final_text
             # Nothing to salvage — retry the whole turn.
             if attempt >= _MAX_EMPTY_TURN_RETRIES:
+                outcome = "model_behavior_error"
+                error = str(e)
+                _finalize()
                 raise
             ui.print_notice(
                 f"note: the model's tool call failed before producing any "
@@ -221,11 +260,20 @@ async def run_turn(
                 f"({attempt + 1}/{_MAX_EMPTY_TURN_RETRIES})",
                 quiet=quiet,
             )
+        except Exception as e:  # noqa: BLE001
+            # Any other failure exiting the turn — most importantly
+            # UsageLimitExceeded (the model looped until it hit
+            # request_limit), but also a raw provider error. Previously
+            # these propagated straight out with no smell line, so
+            # --backtest was blind to exactly the runs that regressed
+            # worst. Record, then re-raise unchanged so cli.py's handler
+            # still does its job. See betterment/plan.txt 6.2 D1.
+            outcome = _classify_exception(e)
+            error = f"{type(e).__name__}: {e}"
+            _finalize()
+            raise
 
-    elapsed = time.monotonic() - start
-    usage = result.usage
-    ui.render_usage(usage.cost, usage.total_tokens, elapsed, quiet=quiet)
-    record_smell(cfg, prompt, dict(tool_names), attempt, elapsed, usage)
+    _finalize()
 
     final_text = "".join(final_text_parts)
     if _skipped_reading_files(tool_names, final_text):

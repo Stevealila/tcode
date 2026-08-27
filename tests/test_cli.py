@@ -127,6 +127,38 @@ class TestLastUserPrompt:
         messages = [ModelRequest(parts=[UserPromptPart(content="text prompt")])]
         assert _last_user_prompt(messages) == "text prompt"
 
+    def test_skips_harness_injected_limit_warning_tail(self):
+        from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+        messages = [
+            ModelRequest(parts=[UserPromptPart(content="the real task: refactor auth")]),
+            ModelResponse(parts=[TextPart(content="on it")]),
+            ModelRequest(
+                parts=[
+                    UserPromptPart(
+                        content="[WarnNearLimits]\nCRITICAL: Configured run limits are "
+                        "approaching.\n- Total tokens: 16206/6000 used (270%)"
+                    )
+                ]
+            ),
+        ]
+        assert _last_user_prompt(messages) == "the real task: refactor auth"
+
+    def test_skips_legacy_limitwarner_marker(self):
+        from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+        messages = [
+            ModelRequest(parts=[UserPromptPart(content="do the thing")]),
+            ModelRequest(parts=[UserPromptPart(content="[LimitWarner] URGENT: wrap up")]),
+        ]
+        assert _last_user_prompt(messages) == "do the thing"
+
+    def test_brackets_later_in_a_real_prompt_are_not_a_false_positive(self):
+        from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+        messages = [ModelRequest(parts=[UserPromptPart(content="update the [WIP] section of README")])]
+        assert _last_user_prompt(messages) == "update the [WIP] section of README"
+
 
 class TestClosestSmellRecord:
     def test_picks_nearest_record_before_archive_time(self):
@@ -154,3 +186,24 @@ class TestClosestSmellRecord:
         now = dt.datetime(2026, 8, 26, 12, 0, 0)
         records = [{"no_timestamp": True}, {"timestamp": "not-a-date"}]
         assert _closest_smell_record(records, now) is None
+
+    def test_matches_a_sub_second_record_written_just_before_the_archive(self):
+        """The real-world shape (betterment/plan.txt O1): record_smell
+        stamps microseconds, the archive filename stem is floored to a
+        whole second, and record_smell fires a few hundred ms before
+        save_session — so raw the record lands *after* its own archive and
+        the old guard rejected it. The whole point of the match.
+        """
+        import datetime as dt
+
+        archive_dt = dt.datetime(2026, 8, 27, 12, 20, 20)  # from "20260827-122020"
+        records = [{"timestamp": "2026-08-27T12:20:20.555854", "tag": "the_turn"}]
+        best = _closest_smell_record(records, archive_dt)
+        assert best is not None and best["tag"] == "the_turn"
+
+    def test_still_rejects_a_record_from_a_later_second(self):
+        import datetime as dt
+
+        archive_dt = dt.datetime(2026, 8, 27, 12, 20, 20)
+        records = [{"timestamp": "2026-08-27T12:20:23.100000", "tag": "next_turn"}]
+        assert _closest_smell_record(records, archive_dt) is None

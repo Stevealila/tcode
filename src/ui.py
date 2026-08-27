@@ -48,7 +48,7 @@ def _out(quiet: bool) -> Console:
 BANNER = """\
 [bold cyan]tcode[/bold cyan] [dim]— an alternative to Claude Code, running on Groq[/dim]
   [dim]dir[/dim]     {cwd}
-  [dim]model[/dim]   {model}
+  [dim]model[/dim]   {model}{effort}
   [dim]memory[/dim]  {memory_dir}
   [dim]scratch[/dim] {scratch_dir}
 [dim]/help for commands, Ctrl-D or /exit to leave[/dim]
@@ -71,10 +71,16 @@ def print_banner(cfg: Config) -> None:
         BANNER.format(
             cwd=cfg.cwd,
             model=cfg.model,
+            effort=f"  [dim](effort: {cfg.effort})[/dim]" if cfg.effort else "",
             memory_dir=cfg.memory_dir,
             scratch_dir=cfg.scratch_dir,
         )
     )
+    if cfg.sandboxed:
+        console.print(
+            "  [dim]sandbox[/dim] [green]on[/green] "
+            "[dim]— workspace + ~/.tcode writable, rest read-only[/dim]\n"
+        )
 
 
 def print_help() -> None:
@@ -154,32 +160,77 @@ def _fmt_smell(record: dict | None) -> str:
     tokens = record.get("total_tokens")
     elapsed_str = f"{elapsed:.1f}s" if elapsed is not None else "?s"
     tokens_str = f"{tokens}tok" if tokens is not None else "?tok"
-    return f"{tools} tools, {retries} retries, {elapsed_str}, {tokens_str}"
+    base = f"{tools} tools, {retries} retries, {elapsed_str}, {tokens_str}"
+    outcome = record.get("outcome")
+    if outcome and outcome != "ok":
+        base += f" [{outcome}]"
+    return base
+
+
+def backtest_regression(old: dict | None, new: dict | None) -> str | None:
+    """A short reason string if replaying `old`'s prompt on the current
+    model (`new`) looks like a regression, else None.
+
+    Signals: a non-ok outcome slug on the replay (looped into the request
+    limit, crashed on a garbled tool call — flagged even with no baseline);
+    then, against the baseline, a tool-call jump (>2), any retry increase,
+    >2.5x wall-clock, or >1.5x tokens — a model that runs the same tool
+    sequence but takes 3x as long is still a regression. See
+    betterment/plan.txt 3.1.d.ii and 6.2 D1.
+    """
+    # A replay that looped into the request limit or crashed on a garbled
+    # tool call is the most important thing to flag, and it can happen with
+    # no baseline to compare against — so check the outcome slug first,
+    # before the old/new guard. See betterment/plan.txt 6.2 D1.
+    if new is not None:
+        new_outcome = new.get("outcome")
+        if new_outcome and new_outcome not in ("ok", "salvaged_after_tool_failure"):
+            return f"replay: {new_outcome}"
+
+    if old is None or new is None:
+        return None
+    reasons: list[str] = []
+
+    old_tools = sum(old.get("tool_counts", {}).values())
+    new_tools = sum(new.get("tool_counts", {}).values())
+    if new_tools > old_tools + 2:
+        reasons.append(f"+{new_tools - old_tools} tool calls")
+
+    old_retries = old.get("retry_count", 0) or 0
+    new_retries = new.get("retry_count", 0) or 0
+    if new_retries > old_retries:
+        reasons.append(f"+{new_retries - old_retries} retries")
+
+    old_elapsed, new_elapsed = old.get("elapsed_s"), new.get("elapsed_s")
+    if old_elapsed and new_elapsed and new_elapsed > old_elapsed * 2.5:
+        reasons.append(f"{new_elapsed / old_elapsed:.1f}x slower")
+
+    old_tokens, new_tokens = old.get("total_tokens"), new.get("total_tokens")
+    if old_tokens and new_tokens and new_tokens > old_tokens * 1.5:
+        reasons.append(f"{new_tokens / old_tokens:.1f}x tokens")
+
+    return ", ".join(reasons) or None
 
 
 def render_backtest_table(rows: list[tuple[str, dict | None, dict | None]]) -> None:
     """One row per replayed prompt: before (recorded at the time) vs after
-    (this run, current model) — flagged when tool-call count or retries
-    jumped materially. See cli.py's backtest_mode."""
+    (this run, current model) — flagged, with a reason, when tool-call
+    count, retries, wall-clock time, or token use jumped materially. See
+    cli.py's backtest_mode and backtest_regression above."""
     from rich.table import Table
 
     table = Table(title="backtest")
     table.add_column("prompt")
     table.add_column("before")
     table.add_column("after")
-    table.add_column("")
+    table.add_column("regression?")
     for prompt, old, new in rows:
-        flagged = False
-        if old is not None and new is not None:
-            old_tools = sum(old.get("tool_counts", {}).values())
-            new_tools = sum(new.get("tool_counts", {}).values())
-            if new_tools > old_tools + 2 or new.get("retry_count", 0) > old.get("retry_count", 0):
-                flagged = True
+        reason = backtest_regression(old, new)
         table.add_row(
             _short(prompt, limit=60),
             _fmt_smell(old),
             _fmt_smell(new),
-            "[bold red]⚠[/bold red]" if flagged else "",
+            f"[bold red]⚠ {reason}[/bold red]" if reason else "",
         )
     console.print(table)
 

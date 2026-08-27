@@ -150,6 +150,18 @@ class Config:
     allowed_commands: list[str]
     shell: bool
     readonly: bool
+    # True when this process is running inside the bubblewrap/firejail
+    # sandbox it re-exec'd itself into (--sandbox / TCODE_SANDBOX=1) — the
+    # honest signal for the banner, set by sandbox.py before re-exec. Not a
+    # request flag: it means "the boundary is actually in place".
+    sandboxed: bool
+    # Reasoning-effort for the *primary* turn's model: "low" | "medium" |
+    # "high", or None to leave the model at its own default. Set by
+    # --effort / --think (cli.py) or TCODE_EFFORT. Distinct from the
+    # `expert` sub-agent menu (agent.py), which only affects delegations.
+    # Applied as GroqModelSettings(groq_reasoning_effort=...) in build_agent;
+    # a no-op on providers that don't expose the knob (google/zai) for now.
+    effort: str | None
     tool_output_max_chars: int
     keep_tool_pairs: int
     clear_after_tokens: int
@@ -185,7 +197,14 @@ class ConfigError(RuntimeError):
     """Raised when required configuration (like the API key) is missing."""
 
 
-def load_config(cwd: Path | None = None, model_override: str | None = None) -> Config:
+_EFFORT_LEVELS = ("low", "medium", "high")
+
+
+def load_config(
+    cwd: Path | None = None,
+    model_override: str | None = None,
+    effort_override: str | None = None,
+) -> Config:
     cwd = (cwd or Path.cwd()).resolve()
 
     _load_env_files(cwd)
@@ -218,6 +237,17 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
             )
     request_limit = int(os.environ.get("GROQ_REQUEST_LIMIT", DEFAULT_REQUEST_LIMIT))
 
+    # --effort / --think (via effort_override) beats TCODE_EFFORT; empty ->
+    # None (model's own default). Validate here so a typo fails fast rather
+    # than being silently forwarded to the provider and rejected mid-turn.
+    raw_effort = (effort_override or os.environ.get("TCODE_EFFORT", "")).strip().lower()
+    if raw_effort and raw_effort not in _EFFORT_LEVELS:
+        raise ConfigError(
+            f"invalid effort {raw_effort!r} — use one of {', '.join(_EFFORT_LEVELS)} "
+            "(--effort low|medium|high, or --think for high)."
+        )
+    effort = raw_effort or None
+
     # An empty list here means "denylist mode": Shell blocks a short list of
     # destructive commands (rm, dd, mkfs, shutdown, ...) and allows
     # everything else. Set TCODE_ALLOWED_COMMANDS to flip to strict
@@ -243,6 +273,10 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
     # tools only, matching FileSystem's own read_only=True.
     raw_readonly = os.environ.get("TCODE_READONLY", "").strip().lower()
     readonly = raw_readonly not in ("", "0", "false", "no") if raw_readonly else DEFAULT_READONLY
+
+    # Set by sandbox.py on the process it re-execs into a bubblewrap/firejail
+    # jail; absent in a normal run. Purely informational here (the banner).
+    sandboxed = os.environ.get("TCODE_SANDBOX_ACTIVE") == "1"
 
     # Groq's lower tiers cap throughput at a few thousand tokens per minute,
     # so a single unbounded tool result (e.g. `ls -R` on a real repo) can
@@ -395,6 +429,8 @@ def load_config(cwd: Path | None = None, model_override: str | None = None) -> C
         allowed_commands=allowed_commands,
         shell=shell,
         readonly=readonly,
+        sandboxed=sandboxed,
+        effort=effort,
         tool_output_max_chars=tool_output_max_chars,
         keep_tool_pairs=keep_tool_pairs,
         clear_after_tokens=clear_after_tokens,

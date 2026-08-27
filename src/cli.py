@@ -541,16 +541,32 @@ async def reduce_mode(
     save_session(cfg, message_history)
 
 
+# A harness capability that injects a pseudo-user turn tags it with a
+# bracketed name at the very start of the text — `[WarnNearLimits]`,
+# `[LimitWarner]`, `[ClearToolResults]`, etc. WarnNearLimits in particular
+# fires on almost every non-trivial run at tcode's token budgets
+# (clear_after_tokens ~3000, warn at 2x), so without this filter a large
+# share of archived sessions would have _last_user_prompt return the
+# warning text and --backtest would replay *that* as the task. Pinned /
+# receipt parts use list-typed content and are already excluded by the
+# `isinstance(part.content, str)` check below. See betterment/plan.txt 6.2 D2.
+_SYNTHETIC_USER_PART = re.compile(r"^\s*\[[A-Za-z][\w -]*\]")
+
+
 def _last_user_prompt(messages: list[ModelMessage]) -> str | None:
-    """The most recently added user prompt in an archived session's message
-    list — the actual instruction that produced this archive, as opposed to
-    earlier turns of the same conversation already covered by their own
-    archive files."""
+    """The most recently added *real* user prompt in an archived session's
+    message list — the actual instruction that produced this archive, as
+    opposed to earlier turns of the same conversation (covered by their own
+    archive files) or a harness-injected limit-warning turn."""
     prompt = None
     for msg in messages:
         if isinstance(msg, ModelRequest):
             for part in msg.parts:
-                if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                if (
+                    isinstance(part, UserPromptPart)
+                    and isinstance(part.content, str)
+                    and not _SYNTHETIC_USER_PART.match(part.content)
+                ):
                     prompt = part.content
     return prompt
 
@@ -558,15 +574,22 @@ def _last_user_prompt(messages: list[ModelMessage]) -> str | None:
 def _closest_smell_record(records: list[dict], archive_dt: _dt.datetime, window_s: float = 120.0) -> dict | None:
     """The smell.jsonl record for the turn that produced `archive_dt`.
 
-    record_smell fires moments before save_session within the same turn, so
-    the right record is the one whose own timestamp is closest to, but not
-    after, the archive's — matched by proximity rather than requiring an
-    exact timestamp, since the two writes are never simultaneous.
+    record_smell fires a few hundred ms before save_session within the same
+    turn, so the right record is the one written just before the archive.
+    Its timestamp (`datetime.now().isoformat()`) carries microseconds;
+    `archive_dt` comes from a filename stem (`%Y%m%d-%H%M%S`) floored to a
+    whole second. Comparing the two raw makes the turn's own record land a
+    fraction of a second *after* its archive (record at HH:MM:SS.6, archive
+    at HH:MM:SS.0), so a "record must precede the archive" guard rejects
+    exactly the record it should match — the bug in betterment/plan.txt O1.
+    Flooring the record timestamp to whole seconds first puts both sides at
+    the same resolution; `delta` is then >= 0 for the real match and the
+    nearest one wins.
     """
     best, best_delta = None, None
     for r in records:
         try:
-            r_dt = _dt.datetime.fromisoformat(r["timestamp"])
+            r_dt = _dt.datetime.fromisoformat(r["timestamp"]).replace(microsecond=0)
         except (KeyError, ValueError, TypeError):
             continue
         delta = (archive_dt - r_dt).total_seconds()
@@ -587,31 +610,69 @@ async def backtest_mode(cfg: Config, n: int) -> None:
         ui.print_notice("no saved sessions to backtest against")
         return
 
+    # Header so a run from the wrong directory is obvious — all state is
+    # cwd-scoped, so `backtest` from the wrong place silently replays a
+    # different project's prompts. See betterment/plan.txt 6.2 D4.
+    ui.print_notice(
+        f"backtest: {cfg.project_label} · {len(archives)} archive(s) · "
+        f"replaying against {cfg.provider}:{cfg.model}"
+    )
+
     smell_records = load_smell_log(cfg)
     agent = build_agent(cfg)
     usage_limits = UsageLimits(request_limit=cfg.request_limit)
 
     rows: list[tuple[str, dict | None, dict | None]] = []
+    skipped_unparseable = 0
+    skipped_no_prompt = 0
     for path in reversed(archives):  # oldest first, easier to read chronologically
         try:
             archive_dt = _dt.datetime.strptime(path.stem, "%Y%m%d-%H%M%S")
         except ValueError:
+            skipped_unparseable += 1
             continue
         prompt = _last_user_prompt(load_archive(path))
         if prompt is None:
+            skipped_no_prompt += 1
             continue
         old = _closest_smell_record(smell_records, archive_dt)
+        replay_error: str | None = None
         try:
             await run_turn(agent, prompt, [], usage_limits, cfg, quiet=True, capture=True)
         except Exception as e:  # noqa: BLE001 - one bad replay shouldn't stop the rest
-            ui.print_notice(f"backtest: {path.stem} failed to replay: {e}")
-            continue
+            # Include the exception *type*, not just str(e): some harness
+            # failures (e.g. a Memory-capability IndexError seen when a
+            # poisoned prompt reached the first model request — 6.2 D3,
+            # worth an upstream report) stringify to something as
+            # uninformative as "list index out of range".
+            replay_error = f"{type(e).__name__}: {e}"
+            ui.print_notice(f"backtest: {path.stem} failed to replay: {replay_error}")
+        # run_turn now writes a smell line on failure too (6.2 D1), so a
+        # crashed replay usually still has a `new` record with its own
+        # outcome slug; synthesize a minimal one only when even that is
+        # missing (the turn died before record_smell could run).
         after = load_smell_log(cfg)
         new = after[-1] if len(after) > len(smell_records) else None
         smell_records = after
+        if new is None and replay_error is not None:
+            new = {"outcome": "replay_crashed", "error": replay_error, "tool_counts": {}, "retry_count": 0}
         rows.append((prompt, old, new))
 
+    if not rows:
+        ui.print_notice(
+            f"backtest: 0 of {len(archives)} archive(s) had a usable prompt "
+            f"({skipped_unparseable} unparseable name, {skipped_no_prompt} no "
+            "real user prompt) — nothing to replay"
+        )
+        return
+
     ui.render_backtest_table(rows)
+    if skipped_unparseable or skipped_no_prompt:
+        ui.print_notice(
+            f"backtest: replayed {len(rows)}, skipped "
+            f"{skipped_unparseable + skipped_no_prompt} "
+            f"({skipped_unparseable} unparseable name, {skipped_no_prompt} no prompt)"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -627,6 +688,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue the last session in this directory",
     )
     parser.add_argument("--model", default=None, help="override the Groq model for this run")
+    parser.add_argument(
+        "--effort", choices=["low", "medium", "high"], default=None,
+        help="reasoning-effort for the primary model this run (low/medium/high). "
+        "More effort = deeper reasoning, more tokens, slower — a per-task knob for "
+        "a hard problem. Affects the main loop only, not sub-agent delegations "
+        "(those have their own 'expert' model). Also settable with TCODE_EFFORT.",
+    )
+    parser.add_argument(
+        "--think", action="store_const", const="high", dest="effort",
+        help="shorthand for --effort high.",
+    )
     parser.add_argument(
         "--sessions", action="store_true", help="list saved sessions for this directory and exit"
     )
@@ -664,6 +736,16 @@ def build_parser() -> argparse.ArgumentParser:
         "smell.jsonl under this project's sessions directory).",
     )
     parser.add_argument(
+        "--sandbox", action="store_true",
+        help="Linux only: re-exec tcode inside bubblewrap/firejail with only "
+        "the workspace and ~/.tcode writable and the rest of the filesystem "
+        "read-only — an OS-level backstop to the in-process shell/write "
+        "guardrails for a caller who won't set TCODE_SHELL=0. Network stays "
+        "reachable (the model API needs it). No-op with a warning on non-Linux "
+        "or if neither sandbox tool is installed. Also settable with "
+        "TCODE_SANDBOX=1.",
+    )
+    parser.add_argument(
         "--reduce", metavar="PATTERN", default=None,
         help="one-shot mode only: PATTERN is a glob (relative to this directory, ** "
         "allowed) matching many files to read and reduce to one answer — the prompt "
@@ -682,8 +764,15 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    # Before anything else: os.execvp replaces this process, so any work done
+    # ahead of it is wasted. A no-op unless --sandbox / TCODE_SANDBOX asked
+    # for it and a sandbox tool is available. See sandbox.py.
+    from .sandbox import maybe_reexec
+
+    maybe_reexec(args.sandbox, quiet=args.quiet)
+
     try:
-        cfg = load_config(Path.cwd(), model_override=args.model)
+        cfg = load_config(Path.cwd(), model_override=args.model, effort_override=args.effort)
     except ConfigError as e:
         ui.print_error(str(e))
         raise SystemExit(1) from e
