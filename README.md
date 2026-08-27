@@ -76,21 +76,33 @@ uv tool uninstall tcode    # remove the command (leaves ~/.tcode untouched)
 
 ### Installing from a local clone (only for hacking on tcode)
 
-You only need a clone if you intend to modify tcode's own source. Install
-it in editable mode:
+You only need a clone if you intend to modify tcode's own source.
 
 ```bash
 git clone https://github.com/Stevealila/tcode.git
 cd tcode
+uv sync            # create .venv/ from uv.lock, including the dev group
+uv run pytest      # run the test suite
+uv run tcode       # run your working copy
+```
+
+`uv sync` builds the project's own virtualenv at `.venv/` (gitignored)
+with every runtime dependency plus the `dev` group (pytest). From then
+on `uv run tcode` runs the code in the clone and `uv run pytest` runs
+the tests, both against that `.venv`.
+
+To also put a `tcode` command on your `PATH` that tracks your edits with
+no reinstall, add an editable tool install on top:
+
+```bash
 uv tool install --editable .
 ```
 
-With `--editable`, the installed `tcode` command imports its code
-straight from this checkout on every run, so your edits take effect with
-no reinstall. The trade-off: the command is now bound to this directory.
-If you move, rename, or delete the clone, `tcode` breaks until you
-reinstall. If you only want to *use* tcode, use the Quick start above
-instead.
+With `--editable` the installed command imports its code straight from
+this checkout on every run. The trade-off: the command is now bound to
+this directory. If you move, rename, or delete the clone, `tcode` breaks
+until you reinstall. If you only want to *use* tcode, use the Quick start
+above instead.
 
 ## Configure
 
